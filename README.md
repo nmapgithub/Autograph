@@ -4,6 +4,20 @@ Autograph writes a driver's signature as next-gen car telemetry. Pick a person, 
 
 It does not connect to a real car. Logs stay on disk until you download them or push them to an OpenSearch cluster you name.
 
+## Start
+
+Docker is the quick way. It works on Ubuntu and on Windows with Docker Desktop. From this directory:
+
+```bash
+docker compose up --build
+```
+
+Open http://127.0.0.1:8000. The first start creates `data/` and seeds Usman, Waqas, and John. That folder holds the database and the logs, and it stays on the machine when you rebuild. Stop the lab with `docker compose down`.
+
+Port 8000 must be free. On Ubuntu, files in `data/` are written as root, so reading or deleting them on the host may need `sudo`.
+
+A Python install, without Docker, is described under Install and Run.
+
 ## What you get
 
 Three drivers are created the first time the app starts:
