@@ -135,7 +135,9 @@ GET /api/runs/{id}/export?kind=telemetry&fmt=bulk
 GET /api/runs/{id}/export?kind=events&fmt=bulk
 ```
 
-Autograph does not talk to OpenSearch. To load a bulk file yourself, after you have a cluster and an index:
+On the Logs tab, **Push to OpenSearch** asks for the protocol, host, port, username, password, and the two index names, then sends every run straight to that cluster. Telemetry defaults to `vehicle-telemetry` and events to `vehicle-events`. The password is used for that push and is not saved. For a local cluster with the demo certificate, turn on “Allow a self-signed certificate”.
+
+You can still load a downloaded bulk file yourself:
 
 ```bash
 curl -s -H "Content-Type: application/x-ndjson" -X POST \
@@ -143,7 +145,7 @@ curl -s -H "Content-Type: application/x-ndjson" -X POST \
   --data-binary @telemetry.ndjson
 ```
 
-Use whatever authentication your cluster requires. Create the indexes before the bulk call if you do not want OpenSearch to guess the mapping. `@timestamp` is the field to use as the time axis.
+`@timestamp` is the field to use as the time axis.
 
 ## HTTP API
 
@@ -163,6 +165,8 @@ Use whatever authentication your cluster requires. Create the indexes before the
 | GET | `/api/runs/{id}` | One run, its chart series, and its events. |
 | GET | `/api/runs/{id}/samples?offset=0&limit=40&phase=driving` | A page of telemetry documents. |
 | DELETE | `/api/runs/{id}` | Delete the run and its log files. |
+| GET | `/api/export/opensearch` | One bulk file of every run. |
+| POST | `/api/opensearch/push` | Send every run to a cluster. Body: `scheme`, `host`, `port`, `username`, `password`, `telemetry_index`, `events_index`, `verify_tls`. |
 | GET | `/api/ueba` | Score board. |
 
 There is no login. Anyone who can reach the port can run days, add drivers, and delete logs.

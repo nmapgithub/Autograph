@@ -18,6 +18,17 @@ const state = {
   runs: [],
   board: [],
   log: { offset: 0, phase: "", rows: [], matched: 0, focusId: null },
+  os: {
+    open: false,
+    scheme: "https",
+    host: "localhost",
+    port: "9200",
+    username: "admin",
+    password: "",
+    telemetry: "vehicle-telemetry",
+    events: "vehicle-events",
+    insecure: false,
+  },
   chartMode: "day",
   eventFilter: "all",
   catalog: [],
@@ -674,6 +685,126 @@ function hover(ev, canvas, points) {
   }
 }
 
+function openSearchForm() {
+  const form = el("form", null, "card");
+  form.id = "os-form";
+  form.hidden = !state.os.open;
+  form.style.marginTop = "12px";
+  form.addEventListener("submit", pushOpenSearch);
+  form.appendChild(el("h3", "OpenSearch"));
+  form.appendChild(el("p", "Every stored run is sent to this cluster. The password is used for the push and is not saved.", "lede"));
+  const grid = el("div", null, "form-grid");
+  const scheme = document.createElement("select");
+  scheme.id = "os-scheme";
+  for (const name of ["https", "http"]) {
+    const opt = el("option", name);
+    opt.value = name;
+    scheme.appendChild(opt);
+  }
+  scheme.value = state.os.scheme;
+  grid.appendChild(field("Protocol", scheme, "http or https."));
+  const host = document.createElement("input");
+  host.id = "os-host";
+  host.value = state.os.host;
+  host.autocomplete = "off";
+  host.placeholder = "localhost";
+  grid.appendChild(field("Host", host, "Hostname or IP. A full URL is accepted."));
+  const port = document.createElement("input");
+  port.id = "os-port";
+  port.type = "number";
+  port.min = "1";
+  port.max = "65535";
+  port.value = state.os.port;
+  grid.appendChild(field("Port", port, "9200 is the usual OpenSearch port."));
+  const user = document.createElement("input");
+  user.id = "os-user";
+  user.value = state.os.username;
+  user.autocomplete = "username";
+  grid.appendChild(field("Username", user, "Leave blank if the cluster has no security plugin."));
+  const password = document.createElement("input");
+  password.id = "os-pass";
+  password.type = "password";
+  password.value = state.os.password;
+  password.autocomplete = "current-password";
+  grid.appendChild(field("Password", password, "Sent with this push only."));
+  const telemetry = document.createElement("input");
+  telemetry.id = "os-telemetry";
+  telemetry.value = state.os.telemetry;
+  grid.appendChild(field("Telemetry index", telemetry, "One document per sample."));
+  const events = document.createElement("input");
+  events.id = "os-events";
+  events.value = state.os.events;
+  grid.appendChild(field("Events index", events, "Gear, doors, cameras, and the other changes."));
+  form.appendChild(grid);
+  const insecure = el("label", null, "field check");
+  insecure.style.marginTop = "12px";
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.id = "os-insecure";
+  box.checked = state.os.insecure;
+  insecure.appendChild(box);
+  insecure.appendChild(document.createTextNode(" Allow a self-signed certificate"));
+  form.appendChild(insecure);
+  const actions = el("div", null, "row");
+  actions.style.marginTop = "12px";
+  const go = el("button", "Push all logs", "primary");
+  go.id = "os-push";
+  go.type = "submit";
+  actions.appendChild(go);
+  form.appendChild(actions);
+  return form;
+}
+
+async function pushOpenSearch(event) {
+  event.preventDefault();
+  const button = $("os-push");
+  const port = Number($("os-port").value);
+  state.os = {
+    open: true,
+    scheme: $("os-scheme").value,
+    host: $("os-host").value.trim(),
+    port: $("os-port").value,
+    username: $("os-user").value,
+    password: $("os-pass").value,
+    telemetry: $("os-telemetry").value.trim(),
+    events: $("os-events").value.trim(),
+    insecure: $("os-insecure").checked,
+  };
+  if (!state.os.host) {
+    setStatus("Enter the OpenSearch host.");
+    return;
+  }
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    setStatus("Port must be between 1 and 65535.");
+    return;
+  }
+  button.disabled = true;
+  setStatus(`Pushing every log to ${state.os.scheme}://${state.os.host}:${port}…`);
+  try {
+    const data = await api("/api/opensearch/push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scheme: state.os.scheme,
+        host: state.os.host,
+        port,
+        username: state.os.username,
+        password: state.os.password,
+        telemetry_index: state.os.telemetry,
+        events_index: state.os.events,
+        verify_tls: !state.os.insecure,
+      }),
+    });
+    const problem = data.failed ? ` ${data.failed} rejected.` : "";
+    const sample = data.errors && data.errors.length ? ` ${data.errors[0]}` : "";
+    setStatus(`Pushed ${data.indexed} documents to ${data.endpoint} (${data.telemetry_index}, ${data.events_index}).${problem}${sample}`);
+  } catch (err) {
+    setStatus(err.message);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 function renderLogs() {
   const panel = $("panel-logs");
   panel.textContent = "";
@@ -722,8 +853,25 @@ function renderLogs() {
     state.log.offset = 0;
     loadSamples();
   });
-  row.append(pick, phase, prev, next);
+  const all = el("a", "Export all logs for OpenSearch", "linkish primary");
+  all.href = "/api/export/opensearch";
+  all.setAttribute("download", "autograph-opensearch.ndjson");
+  const push = el("button", "Push to OpenSearch");
+  push.type = "button";
+  push.addEventListener("click", () => {
+    state.os.open = !state.os.open;
+    const form = $("os-form");
+    if (form) form.hidden = !state.os.open;
+  });
+  if (!state.runs.length) {
+    all.removeAttribute("href");
+    all.setAttribute("aria-disabled", "true");
+    push.disabled = true;
+  }
+  row.append(pick, phase, prev, next, all, push);
   panel.appendChild(row);
+  panel.appendChild(el("p", "Export all downloads one bulk file. Push to OpenSearch sends every run to a cluster you name.", "footnote"));
+  panel.appendChild(openSearchForm());
   const tableWrap = el("div", null, "scroll");
   tableWrap.id = "log-table";
   tableWrap.style.marginTop = "12px";
@@ -960,7 +1108,7 @@ function renderSignals() {
   table.appendChild(body);
   wrap.appendChild(table);
   panel.appendChild(wrap);
-  panel.appendChild(el("p", "Bulk export is newline-delimited JSON with an OpenSearch action line in front of each document. Indexes: vehicle-telemetry and vehicle-events. Wiring the cluster is the next step.", "footnote"));
+  panel.appendChild(el("p", "The Logs tab can download a bulk file or push every run to an OpenSearch cluster. Default indexes: vehicle-telemetry and vehicle-events.", "footnote"));
 }
 
 async function boot() {

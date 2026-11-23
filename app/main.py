@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from app.catalog import FRAMES, PARAM_SCHEMA, SIGNALS, STANDARDS, clamp_params
 from app.drivelog import record_drive
+from app.opensearch import push_logs
 from app.profiles import template_from
 from app.simulator import run_simulation
 from app.store import (
@@ -94,6 +95,17 @@ class DriveEventBody(BaseModel):
     severity: str = "info"
     speed_kmh: float = 0
     gear: str = "P"
+
+
+class OpenSearchBody(BaseModel):
+    scheme: str = "https"
+    host: str = Field(default="", max_length=300)
+    port: int = 9200
+    username: str = Field(default="", max_length=200)
+    password: str = Field(default="", max_length=200)
+    telemetry_index: str = Field(default="vehicle-telemetry", max_length=255)
+    events_index: str = Field(default="vehicle-events", max_length=255)
+    verify_tls: bool = True
 
 
 class DriveBatchBody(BaseModel):
@@ -349,6 +361,47 @@ def remove_run(run_id: str):
     return {"ok": True}
 
 
+def _bulk_lines(path: Path, index: str):
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            yield json.dumps({"index": {"_index": index}}) + "\n"
+            yield line if line.endswith("\n") else line + "\n"
+
+
+@app.get("/api/export/opensearch")
+def export_all_opensearch():
+    runs = list(reversed(list_runs()))
+    files = []
+    for run in runs:
+        stored = run.get("files") or {}
+        for key, index in (("telemetry_file", "vehicle-telemetry"), ("events_file", "vehicle-events")):
+            rel = stored.get(key)
+            if not rel:
+                continue
+            path = ROOT / rel
+            if path.is_file():
+                files.append((path, index))
+    if not files:
+        raise HTTPException(404, "No log files to export.")
+
+    def bulk():
+        for path, index in files:
+            yield from _bulk_lines(path, index)
+
+    return StreamingResponse(
+        bulk(),
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": 'attachment; filename="autograph-opensearch.ndjson"'},
+    )
+
+
+@app.post("/api/opensearch/push")
+def opensearch_push(body: OpenSearchBody):
+    return push_logs(body, list_runs(), ROOT)
+
+
 @app.get("/api/runs/{run_id}/export")
 def export_run(run_id: str, kind: str = "telemetry", fmt: str = "jsonl"):
     run = get_run(run_id)
@@ -363,15 +416,8 @@ def export_run(run_id: str, kind: str = "telemetry", fmt: str = "jsonl"):
     index = "vehicle-telemetry" if kind == "telemetry" else "vehicle-events"
     filename = f"{run_id}-{kind}.{'ndjson' if fmt == 'bulk' else 'jsonl'}"
     if fmt == "bulk":
-        def bulk():
-            with path.open(encoding="utf-8") as handle:
-                for line in handle:
-                    if not line.strip():
-                        continue
-                    yield json.dumps({"index": {"_index": index}}) + "\n"
-                    yield line if line.endswith("\n") else line + "\n"
         return StreamingResponse(
-            bulk(),
+            _bulk_lines(path, index),
             media_type="application/x-ndjson",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )

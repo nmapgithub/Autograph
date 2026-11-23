@@ -62,12 +62,15 @@ body {
   color: var(--ink);
   border-color: var(--copper);
 }
-button.primary {
+button.primary, a.linkish.primary {
   background: var(--copper);
   color: var(--ink);
   border-color: var(--copper);
   font-weight: 650;
+  text-decoration: none;
 }
+a.linkish { text-decoration: none; display: inline-block; }
+a.linkish[aria-disabled="true"] { pointer-events: none; opacity: 0.55; }
 button:disabled { opacity: 0.55; cursor: wait; }
 .status {
   min-height: 1.2em;
