@@ -11,6 +11,17 @@ from app.simulator import State, build_document
 from app.store import LOGS, get_run, save_driver, save_run
 from app.ueba import analyze
 
+def _event_detail(item):
+    detail = {"text": item.text[:240]}
+    raw = item.fields if isinstance(item.fields, dict) else {}
+    if isinstance(raw.get("object"), str):
+        detail["object"] = raw["object"][:40]
+    for key in ("tesla", "vss"):
+        if isinstance(raw.get(key), dict):
+            detail[key] = {str(name)[:80]: value for name, value in list(raw[key].items())[:12]}
+    return detail
+
+
 WINDOW_NAMES = ("fd", "fp", "rd", "rp")
 DOOR_NAMES = ("df", "dr", "pf", "pr")
 
@@ -75,7 +86,7 @@ def record_drive(driver: dict, body) -> dict | None:
                     "vehicle_name": driver["vehicle_name"],
                     "model": driver.get("model", "Model 3"),
                 },
-                "detail": {"text": item.text[:240]},
+                "detail": _event_detail(item),
                 "context": {
                     "speed_kmh": round(abs(item.speed_kmh), 2),
                     "gear": item.gear if item.gear in ("P", "R", "N", "D") else "P",
@@ -212,6 +223,9 @@ def _state(driver, sample, moment, trip_id, stats):
         pedal=max(0.0, min(100.0, float(sample.pedal))),
         brake_pct=max(0.0, min(100.0, float(sample.brake_pct))),
         long_accel=max(-8.0, min(6.0, float(sample.long_accel))),
+        lat_accel=max(-8.0, min(8.0, float(sample.lat_accel))),
+        turn=sample.turn if sample.turn in ("TurnSignalStateOff", "TurnSignalStateLeft", "TurnSignalStateRight", "TurnSignalStateBoth") else "TurnSignalStateOff",
+        aeb=bool(sample.aeb),
         odometer_km=float(driver.get("odometer_km") or 0) + float(sample.meters) / 1000,
         soc=soc,
         pack_voltage=390 - (100 - soc) * 0.45,

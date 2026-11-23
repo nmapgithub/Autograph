@@ -1,6 +1,6 @@
 # Autograph
 
-Autograph writes a driver's signature as next-gen car telemetry. Pick a person, run their day or drive the car yourself, and every door, gear change, speed sample, window, mirror, wiper, and camera sighting lands in a time-series log. The same logs are scored the way a UEBA (user and entity behavior analytics) system would score them: how this person drives, and how far that day sits from a fixed safety line.
+Autograph writes a driver's signature as next-gen car telemetry. Pick a person, run their day, or drive the car yourself in 2D or 3D. Every door, gear change, speed sample, window, mirror, wiper, lane change, collision, and camera sighting lands in a time-series log. The same logs are scored the way a UEBA (user and entity behavior analytics) system would score them: how this person drives, and how far that day sits from a fixed safety line.
 
 It does not connect to a real car. Logs stay on disk until you download them or push them to an OpenSearch cluster you name.
 
@@ -12,7 +12,7 @@ Docker is the quick way. It works on Ubuntu and on Windows with Docker Desktop. 
 docker compose up --build
 ```
 
-Open http://127.0.0.1:8000. The first start creates `data/` and seeds Usman, Waqas, and John. That folder holds the database and the logs, and it stays on the machine when you rebuild. Stop the lab with `docker compose down`.
+Open http://127.0.0.1:8000. The image is Python 3.11 and serves the whole lab, including 2D Drive and 3D Drive. A health check calls `GET /api/health`. The first start creates `data/` and seeds Usman, Waqas, and John. That folder holds the database and the logs, and it stays on the machine when you rebuild. Stop the lab with `docker compose down`.
 
 Port 8000 must be free. On Ubuntu, files in `data/` are written as root, so reading or deleting them on the host may need `sudo`.
 
@@ -32,7 +32,7 @@ A Python install, without Docker, is described under Install and Run.
 
 ![Run a day](docs/screenshots/run.png)
 
-**Drive.** Gear, doors, windows, wipers, belt, lock, and lamps are buttons. Arrow keys drive. Street, Avenue, and Ring road are each 1.0 km, and self-drive uses the saved style.
+**2D Drive and 3D Drive.** The same car, two views. Gear, doors, windows, wipers, belt, lock, and lamps are buttons. Arrow keys drive. Street, Avenue, and Ring road are each 1.0 km. Each trip places breakers, hurdles, and people again. Self-drive asks whether to avoid every collision or to mix lane changes with hits.
 
 ![Drive controls](docs/screenshots/drive.png)
 
@@ -73,7 +73,7 @@ Each telemetry row is one document with four views of the same instant:
 - **CAN frames.** ISO 11898, 500 kbit/s. Community Model 3 frame IDs are used for gear (`0x118`), speed (`0x257`), doors (`0x102`, `0x103`), and body controls (`0x3E9`). The hex payload is a simplified packing, not the community DBC bit layout. `0x321`, `0x322`, `0x5A1`, and `0x3C2` are Autograph frames for the pack, tires, openings, and a camera summary.
 - **Perception.** Simulated Tesla Vision: eight exterior cameras plus a cabin camera. Tracks cover vehicles, pedestrians, obstacles, and speed bumps, with range, side offset, and confidence. Curbs and free parking bays are included. Cabin occupancy covers the driver, passenger, and both rear seats. These tracks are simulated. Tesla's public fleet stream does not publish the occupancy network.
 
-A second file records changes: gear, doors, windows, wipers, hard brakes, locks, charge, and camera sightings.
+A second file records changes: gear, doors, windows, wipers, hard brakes, locks, charge, camera sightings, lane changes, and collisions.
 
 ## Requirements
 
@@ -115,7 +115,7 @@ A healthy process returns `{"ok":true,"name":"autograph"}`.
 
 ## Using the lab
 
-The header has eight tabs.
+The header has nine tabs.
 
 **Fleet.** The three cars, plus anyone you added. **Run a day** writes one full day for that driver. **Run a day for every driver** does the fleet in one pass. **Edit style** opens that person on the Driver tab.
 
@@ -129,19 +129,27 @@ The header has eight tabs.
 
 Sample interval applies while the car is moving and during the door sequence. 500 ms matches a Tesla fleet bucket. 1 second and 2 seconds write fewer rows. Parked and charging stretches are always coarser, about 30–60 seconds, so a full day stays a few thousand documents. The calendar day is stored with that driver's local offset (Lahore and Karachi are UTC+5, Austin is UTC−6). The same seed and the same style reproduce the same day. **Inject a risky stretch** adds a speed burst, a belt off, a door ajar, and a delayed lock. That day is scored, and it is kept out of the personal baseline.
 
-**Drive.** A side view of a 1.0 km road from A to B. Three roads:
+**2D Drive and 3D Drive.** One simulation, two views of the same 1.0 km trip from A to B. 2D Drive is the side view. 3D Drive is the view from just behind the car. Switching tabs does not reset the trip. Three roads:
 
-| Road | Limit | What is on it |
+| Road | Limit | What a new trip places |
 | --- | --- | --- |
-| Street | 40 km/h | Parked cars, pedestrians who step into the lane, a lead car, four speed breakers, one hurdle, two parking bays near B. |
-| Avenue | 60 km/h | Parked cars, one pedestrian, a lead car, an oncoming car, two breakers, two hurdles, one bay. |
-| Ring road | 90 km/h | A pedestrian who stays on the shoulder, a faster lead car, one hurdle, one breaker, one bay. |
+| Street | 40 km/h | More speed breakers, sometimes a hurdle, one to three people. A lead car stays in the right lane. |
+| Avenue | 60 km/h | Breakers and hurdles, one or two people, a lead car, and an oncoming car. |
+| Ring road | 90 km/h | Fewer obstacles, a faster lead car, and sometimes a person. |
 
-Arrow keys drive. Up accelerates, down brakes, left and right change road, Space is a hard brake. The on-screen buttons do the same, and they also open and close doors, set gear, windows, wipers, lights, belt, lock, mirrors, frunk, and trunk. Manual pull and stop use that driver's acceleration and braking. Top speed by hand is 130 km/h. Gear P and R are refused while the car is still rolling.
+Each reset, and each new departure from A, deals a new layout. Positions are listed in the drive log. Mid-trip, the layout stays put, including when you switch between 2D and 3D. Some people step into the right lane. Others stay on the sidewalk.
 
-**Self-drive** moves the car with the saved style: cruise speed capped by the road limit and the over-limit share, late or hard braking if that is how they drive, door cycles at the start, reverse wiggles, windows, mirrors, belt, wipers in rain, and lock on arrival. Taking the wheel ends the self-drive log. The next move starts a manual log. Hitting a hurdle too fast stops the car. A speed breaker taken too fast slows it and shakes the view. Objects drawn on the road are the objects written into the perception log.
+Arrow keys drive. Up accelerates, down brakes, left and right change road, Space is a hard brake. The on-screen buttons do the same, and they also open and close doors, set gear, windows, wipers, lights, belt, lock, mirrors, frunk, and trunk. Manual driving stays in the right lane. Pull and stop use that driver's acceleration and braking. Top speed by hand is 130 km/h. Gear P and R are refused while the car is still rolling.
 
-Both kinds of trip show up on the Logs tab as **manual** or **self-drive**, with the road name. A trip with no movement is not stored.
+The car stops when it meets a hurdle, a person in the lane, the vehicle ahead, or an oncoming vehicle. It does not drive through them. Hazards come on. A speed breaker is a bump, not a collision: taken fast, it slows the car and shakes the view. Objects drawn on the road are the objects written into the perception log.
+
+**Self-drive** asks before it starts. **Avoid collisions** changes lane inside the current road for hurdles, people in the lane, the vehicle ahead, and oncoming traffic. **Hybrid** changes lane for the first of those and stops on a later one. Cancel leaves the car in manual. Oncoming traffic is always given a lane change. The move is logged with Tesla `LightsTurnSignal` (`TurnSignalStateLeft` or `TurnSignalStateRight`) and the VSS direction indicator. `LateralAcceleration` is on the samples while the indicator is on. `AutopilotActive` follows the saved highway share, so it is on for a Ring road lane change when that share is high enough, and off on Street and Avenue.
+
+After the choice, self-drive uses the saved style: cruise speed capped by the road limit and the over-limit share, late or hard braking if that is how they drive, door cycles at the start, reverse wiggles, windows, mirrors, belt, wipers in rain, and lock on arrival. Taking the wheel ends the self-drive log. The next move starts a manual log.
+
+A collision is an `alert`. Tesla's public fleet stream has no collision leaf, so the event uses the fields that do exist: `BrakePedal`, `LongitudinalAcceleration`, `LateralAcceleration`, `AutomaticEmergencyBrakingOff` false, and `LightsHazardsActive`. The VSS side is `Vehicle.ADAS.ABS.IsEngaged` and `Vehicle.ADAS.ESC.IsEngaged`. If both lanes are blocked, automatic emergency braking holds the car and writes an `aeb` event at `watch`.
+
+Both views show up on the Logs tab as **manual** or **self-drive**, with the road name. A trip with no movement is not stored.
 
 **Timeline.** Speed trace for the selected run. Hover for the sample. Full-day runs use clock time. A short drive uses sample order so parked hours do not stretch the chart. Download links sit on this tab.
 
@@ -221,12 +229,15 @@ The eight exterior cameras are FrontMain, FrontNarrow, FrontFisheye, LeftRepeate
 | `speeding_start`, `speeding_end` | Speed crosses 5 percent over a limit of at least 40 km/h. The start is `alert`. |
 | `hard_brake` | Longitudinal accel crosses below −3.5 m/s². `alert`. |
 | `hard_accel` | Longitudinal accel crosses above 2.8 m/s². `alert`. |
+| `lane_change` | A 2D or 3D self-drive move into the other lane. Detail carries `LightsTurnSignal` and the direction indicator. |
+| `collision` | The drive view stops on a hurdle, a person, or another vehicle. `alert`. |
+| `aeb` | Automatic emergency braking when a lane change is not open. `watch`. |
 | `charge_start`, `charge_state`, `charge_complete` | Home charging at 11 kW. |
 | `vision_detect` | A new pedestrian, vehicle, obstacle, or speed bump enters view. A pedestrian in the path inside 8 m is `alert`. |
 | `parking_space` | A free bay comes into range. |
 | `injected_speed_burst`, `injected_door` | Only when you inject a risky stretch. |
 
-A Drive-tab trip uses the same telemetry document. Its event file is the on-screen log, classified as `gear_shift`, `door`, `speed_breaker`, `hurdle`, `seatbelt`, `lock`, `window`, `mirror`, `path`, `takeover`, or `note`. Camera lines from that view are included.
+A 2D or 3D Drive trip uses the same telemetry document. Its event file is the on-screen log, classified as `gear_shift`, `door`, `speed_breaker`, `hurdle`, `lane_change`, `collision`, `aeb`, `seatbelt`, `lock`, `window`, `mirror`, `path`, `takeover`, or `note`. Camera lines from that view are included. `detail` can also carry `object`, `tesla`, and `vss` for a lane change or a collision.
 
 The `*.series.json` file is not a log for OpenSearch. It is the downsampled speed trace for the Timeline chart.
 

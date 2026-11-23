@@ -202,6 +202,9 @@ tr.clickable:hover { background: rgba(208, 138, 58, 0.08); }
 a { color: var(--copper); }
 .footnote { color: var(--muted); font-size: 13px; max-width: 85ch; }
 
+.drive-policy { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0 10px; }
+.drive-policy[hidden] { display: none; }
+.drive-policy span { color: var(--muted); font-size: 13px; }
 .drive-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; margin: 8px 0; }
 .drive-head select, .drive-head input { min-width: 160px; }
 .drive-head button[aria-pressed="true"] {
@@ -244,7 +247,7 @@ a { color: var(--copper); }
   border-color: var(--copper);
 }
 .drive-stage { position: relative; }
-#drive-canvas { height: 560px; background: #10130f; }
+#drive-canvas, #drive3d-canvas { height: 560px; background: #10130f; }
 .drive-pad-row { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-top: 10px; }
 .drive-pad {
   display: grid;
@@ -261,5 +264,5 @@ a { color: var(--copper); }
 .drive-log { color: var(--muted); font-size: 13px; display: flex; flex-direction: column; gap: 2px; min-height: 1.2em; }
 @media (max-width: 900px) {
   .path-pick { grid-template-columns: 1fr; }
-  #drive-canvas { height: 460px; }
+  #drive-canvas, #drive3d-canvas { height: 460px; }
 }

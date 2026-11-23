@@ -1,4 +1,4 @@
-/* Graphical A-to-B drive. Three 1 km paths, manual arrows, and self-drive from the saved style. */
+/* Graphical A-to-B drive. The 2D tab is the side view. The 3D tab is the same roads from behind the car. */
 (function () {
   const PATHS = [
     {
@@ -6,35 +6,21 @@
       blurb: "1.0 km · 40 km/h · speed breakers",
       limit: 40,
       tone: ["#1c3330", "#16302a"],
-      obstacles: [
-        { m: 150, kind: "breaker" },
-        { m: 340, kind: "breaker" },
-        { m: 500, kind: "hurdle" },
-        { m: 690, kind: "breaker" },
-        { m: 860, kind: "breaker" },
-      ],
+      obstacles: [],
     },
     {
       name: "Avenue",
       blurb: "1.0 km · 60 km/h · breakers and hurdles",
       limit: 60,
       tone: ["#2a261c", "#241f18"],
-      obstacles: [
-        { m: 220, kind: "breaker" },
-        { m: 470, kind: "hurdle" },
-        { m: 710, kind: "breaker" },
-        { m: 900, kind: "hurdle" },
-      ],
+      obstacles: [],
     },
     {
       name: "Ring road",
       blurb: "1.0 km · 90 km/h · open, one of each",
       limit: 90,
       tone: ["#1a2838", "#162433"],
-      obstacles: [
-        { m: 260, kind: "hurdle" },
-        { m: 620, kind: "breaker" },
-      ],
+      obstacles: [],
     },
   ];
 
@@ -54,7 +40,11 @@
   let last = 0;
   let canvas;
   let ctx;
+  let canvas3;
+  let ctx3;
+  let view = "";
   let px = 4;
+  let pendingDeal = true;
 
   function blank() {
     return {
@@ -100,6 +90,21 @@
       hits: { breakers: 0, hurdles: 0 },
       log: [],
       seen: {},
+      lane: 1,
+      laneAnim: 1,
+      laneTarget: 1,
+      blinker: "off",
+      blinkUntil: 0,
+      policy: "avoid",
+      latAccel: 0,
+      longAccel: 0,
+      prevSpeed: 0,
+      impactAccel: 0,
+      impactUntil: 0,
+      aebUntil: 0,
+      aebHold: false,
+      dodgeId: "",
+      hitIds: {},
     };
   }
 
@@ -117,15 +122,16 @@
     return d ? d.params : { cruise_kmh: 60, speeding_bias: 0, accel_mps2: 1.4, brake_mps2: 1.8, hard_brake_rate: 0, hard_accel_rate: 0, autopilot_share: 0, gear_shifts_per_trip: 4, door_cycles_per_trip: 2, window_changes_per_trip: 0, mirror_adjustments_per_trip: 0, wiper_tendency: 0, seatbelt_compliance: 1, lock_compliance: 1 };
   }
 
-  function pushLog(text) {
+  function pushLog(text, fields) {
     sim.log.unshift(text);
     sim.log = sim.log.slice(0, 8);
-    const box = document.getElementById("drive-log");
-    if (box) {
+    for (const id of ["drive-log", "drive3d-log"]) {
+      const box = document.getElementById(id);
+      if (!box) continue;
       box.textContent = "";
       for (const line of sim.log) box.appendChild(Object.assign(document.createElement("div"), { textContent: line }));
     }
-    capture(text);
+    capture(text, fields);
   }
 
   const rec = {
@@ -143,6 +149,9 @@
 
   function eventKind(text) {
     const t = text.toLowerCase();
+    if (t.includes("collision")) return "collision";
+    if (t.includes("lane change")) return "lane_change";
+    if (t.includes("emergency braking")) return "aeb";
     if (t.includes("gear")) return "gear_shift";
     if (t.includes("door") || t.includes("frunk") || t.includes("trunk")) return "door";
     if (t.includes("breaker")) return "speed_breaker";
@@ -158,12 +167,13 @@
 
   function eventSeverity(text) {
     const t = text.toLowerCase();
-    if (t.includes("stopped") || t.includes("hit at")) return "alert";
+    if (t.includes("collision") || t.includes("stopped") || t.includes("hit at")) return "alert";
+    if (t.includes("emergency braking")) return "watch";
     if (t.includes("unlocked") || t.includes("over the")) return "watch";
     return "info";
   }
 
-  function capture(text) {
+  function capture(text, fields) {
     if (!text || text.startsWith("At point A")) return;
     const item = {
       at: performance.now(),
@@ -172,6 +182,7 @@
       severity: eventSeverity(text),
       speed_kmh: kmh(),
       gear: sim.gear,
+      fields: fields || {},
     };
     if (!rec.active) {
       rec.pre.push(item);
@@ -191,12 +202,15 @@
       meters: Math.round(sim.meters * 10) / 10,
       speed_kmh: Math.round(kmh() * 10) / 10,
       gear: sim.gear,
-      long_accel: 0,
+      long_accel: Math.round((performance.now() < sim.impactUntil ? sim.impactAccel : sim.longAccel) * 100) / 100,
+      lat_accel: Math.round(sim.latAccel * 100) / 100,
       pedal: keys.up || pad.up ? 45 : 0,
-      brake_pct: keys.brake ? 80 : keys.down || pad.down ? 40 : 0,
+      brake_pct: performance.now() < sim.aebUntil || keys.brake ? 100 : keys.down || pad.down ? 40 : 0,
       path: path.name,
       limit_kmh: path.limit,
-      heading: sim.path * 12,
+      heading: sim.path * 12 + (sim.laneTarget - sim.laneAnim) * 8,
+      turn: sim.blinker === "left" ? "TurnSignalStateLeft" : sim.blinker === "right" ? "TurnSignalStateRight" : "TurnSignalStateOff",
+      aeb: performance.now() < sim.aebUntil,
       doors,
       window_pct: Math.round(sim.window * 100),
       wiper: !!sim.wipers,
@@ -278,6 +292,10 @@
   function begin(mode) {
     if (rec.active && rec.mode === mode) return;
     if (rec.active) finishNow();
+    if (sim.meters <= 45 && pendingDeal) {
+      scatterRoads();
+      pushLog(`New placement. ${sceneLine()}`);
+    }
     const who = driver();
     rec.token += 1;
     rec.active = true;
@@ -300,6 +318,7 @@
     rec.runId = null;
     rec.pending = [];
     rec.events = [];
+    pendingDeal = true;
     if (body) enqueue(body, token);
   }
 
@@ -361,24 +380,108 @@
     sim.pathAnim = pathAnim;
     sim.driverId = driverId;
     applyHabits();
-    pushLog("At point A. Shift to Drive, or start self-drive.");
+    scatterRoads();
+    pushLog(`At point A. ${sceneLine()} Shift to Drive, or start self-drive.`);
     syncButtons();
+  }
+
+  function sceneLine() {
+    const path = PATHS[sim.path];
+    const people = VISION[path.name].pedestrian.length;
+    const breaks = path.obstacles.filter((o) => o.kind === "breaker").map((o) => `${o.m} m`);
+    const hurdles = path.obstacles.filter((o) => o.kind === "hurdle").map((o) => `${o.m} m`);
+    const who = people === 1 ? "1 person" : `${people} people`;
+    return `Breakers ${breaks.join(", ") || "none"}. Hurdles ${hurdles.join(", ") || "none"}. ${who}.`;
+  }
+
+  function scatterRoads() {
+    const recipes = {
+      Street: { breakers: [3, 5], hurdles: [0, 1], people: [1, 3], cross: 0.6 },
+      Avenue: { breakers: [1, 3], hurdles: [1, 2], people: [1, 2], cross: 0.5 },
+      "Ring road": { breakers: [0, 2], hurdles: [0, 1], people: [0, 2], cross: 0.3 },
+    };
+    for (const path of PATHS) {
+      const recipe = recipes[path.name];
+      const used = [];
+      const take = (gap) => {
+        for (let n = 0; n < 60; n += 1) {
+          const m = Math.round(70 + Math.random() * 860);
+          if (used.every((u) => Math.abs(u - m) >= gap)) {
+            used.push(m);
+            return m;
+          }
+        }
+        const m = Math.round(70 + Math.random() * 860);
+        used.push(m);
+        return m;
+      };
+      const count = (pair) => pair[0] + Math.floor(Math.random() * (pair[1] - pair[0] + 1));
+      const obstacles = [];
+      for (let i = 0; i < count(recipe.breakers); i += 1) obstacles.push({ m: take(75), kind: "breaker" });
+      for (let i = 0; i < count(recipe.hurdles); i += 1) obstacles.push({ m: take(75), kind: "hurdle" });
+      obstacles.sort((a, b) => a.m - b.m);
+      path.obstacles = obstacles;
+      const people = [];
+      for (let i = 0; i < count(recipe.people); i += 1) people.push([take(60), Math.random() < recipe.cross]);
+      people.sort((a, b) => a[0] - b[0]);
+      VISION[path.name].pedestrian = people;
+    }
+    sim.seen = {};
+    sim.hitIds = {};
+    sim.dodgeId = "";
+    sim.lane = 1;
+    sim.laneAnim = 1;
+    sim.laneTarget = 1;
+    sim.blinker = "off";
+    sim.aebHold = false;
+    pendingDeal = false;
   }
 
   function kmh() {
     return Math.abs(sim.speed) * 3.6;
   }
 
+  const SHELLS = {
+    drive: {
+      title: "2D Drive",
+      lede: "Side view of three roads, each 1.0 km from A to B. Arrow keys drive. The buttons are the car. Self-drive uses the numbers saved for that driver: cruise, braking, doors, windows, belt, lock, wipers. Speed breakers, hurdles, and people are placed again for each drive.",
+      canvas: "drive-canvas",
+      label: "Car moving from point A to point B, side view",
+    },
+    drive3d: {
+      title: "3D Drive",
+      lede: "The same three roads, from just behind the car. Arrow keys drive. Left and right move across to Street, Avenue, or Ring road. Gear, doors, windows, and lamps are the same car as 2D Drive, and the trip is logged the same way. Speed breakers, hurdles, and people are placed again for each drive.",
+      canvas: "drive3d-canvas",
+      label: "Car moving from point A to point B, seen from behind",
+    },
+  };
+
   function mount() {
     if (mounted || !window.Relay) return;
-    const panel = document.getElementById("panel-drive");
+    buildShell("drive");
+    buildShell("drive3d");
+    canvas = document.getElementById("drive-canvas");
+    canvas3 = document.getElementById("drive3d-canvas");
+    ctx = canvas.getContext("2d");
+    ctx3 = canvas3.getContext("2d");
+    mounted = true;
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    refresh();
+    resetCar();
+    if (active) setActive(view || "drive");
+  }
+
+  function buildShell(which) {
+    const spec = SHELLS[which];
+    const panel = document.getElementById(`panel-${which}`);
     panel.textContent = "";
-    panel.appendChild(h("h2", "Drive"));
-    panel.appendChild(h("p", "Three roads, each 1.0 km from A to B. Arrow keys drive. The buttons are the car. Self-drive uses the numbers saved for that driver: cruise, braking, doors, windows, belt, lock, wipers.", "lede"));
+    panel.appendChild(h("h2", spec.title));
+    panel.appendChild(h("p", spec.lede, "lede"));
 
     const head = div("drive-head");
     const sel = document.createElement("select");
-    sel.id = "drive-driver";
+    sel.id = `${which}-driver`;
     sel.addEventListener("change", () => {
       window.Relay.state.selectedId = sel.value;
       window.Relay.renderDriver();
@@ -390,7 +493,7 @@
       updateCaption();
     });
     const name = document.createElement("input");
-    name.id = "drive-new-name";
+    name.id = `${which}-new-name`;
     name.placeholder = "Add a driver";
     name.autocomplete = "off";
     const add = button("Add driver", addDriver);
@@ -407,8 +510,18 @@
     );
     head.appendChild(modes);
     panel.appendChild(head);
+    const policy = div("drive-policy");
+    policy.hidden = true;
+    policy.dataset.role = "policy";
+    policy.append(
+      h("span", "Self-drive can avoid everyone, or mix it: some lane changes, some collisions."),
+      button("Avoid collisions", () => choosePolicy("avoid")),
+      button("Hybrid", () => choosePolicy("hybrid")),
+      button("Cancel", hidePolicy)
+    );
+    panel.appendChild(policy);
     panel.appendChild(h("p", "", "meta"));
-    panel.lastChild.id = "drive-caption";
+    panel.lastChild.id = `${which}-caption`;
 
     const picks = div("path-pick");
     PATHS.forEach((p, i) => {
@@ -447,11 +560,11 @@
     panel.appendChild(groups);
 
     const stage = div("drive-stage");
-    canvas = document.createElement("canvas");
-    canvas.id = "drive-canvas";
-    canvas.setAttribute("role", "img");
-    canvas.setAttribute("aria-label", "Car moving from point A to point B");
-    stage.appendChild(canvas);
+    const viewCanvas = document.createElement("canvas");
+    viewCanvas.id = spec.canvas;
+    viewCanvas.setAttribute("role", "img");
+    viewCanvas.setAttribute("aria-label", spec.label);
+    stage.appendChild(viewCanvas);
     panel.appendChild(stage);
 
     const padWrap = div("drive-pad-row");
@@ -468,19 +581,11 @@
     panel.appendChild(padWrap);
 
     const readout = h("p", "", "drive-readout mono");
-    readout.id = "drive-readout";
+    readout.id = `${which}-readout`;
     panel.appendChild(readout);
     const log = div("drive-log");
-    log.id = "drive-log";
+    log.id = `${which}-log`;
     panel.appendChild(log);
-
-    ctx = canvas.getContext("2d");
-    mounted = true;
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("keyup", onKeyUp);
-    refresh();
-    resetCar();
-    if (active) setActive(true);
   }
 
   function h(tag, text, className) {
@@ -532,32 +637,42 @@
   function refresh() {
     if (!mounted || !window.Relay) return;
     const previous = sim.driverId;
-    const sel = document.getElementById("drive-driver");
     const keep = window.Relay.state.selectedId;
-    sel.textContent = "";
-    for (const d of window.Relay.state.drivers) {
-      const opt = document.createElement("option");
-      opt.value = d.id;
-      opt.textContent = `${d.name} — ${d.city}`;
-      sel.appendChild(opt);
+    let chosen = "";
+    for (const id of ["drive-driver", "drive3d-driver"]) {
+      const sel = document.getElementById(id);
+      if (!sel) continue;
+      sel.textContent = "";
+      for (const d of window.Relay.state.drivers) {
+        const opt = document.createElement("option");
+        opt.value = d.id;
+        opt.textContent = `${d.name} — ${d.city}`;
+        sel.appendChild(opt);
+      }
+      if (keep && window.Relay.state.drivers.some((d) => d.id === keep)) sel.value = keep;
+      chosen = sel.value;
     }
-    if (keep && window.Relay.state.drivers.some((d) => d.id === keep)) sel.value = keep;
-    if (previous && previous !== sel.value) resetCar();
-    sim.driverId = sel.value || null;
+    if (previous && previous !== chosen) resetCar();
+    sim.driverId = chosen || null;
     updateCaption();
   }
 
   function updateCaption() {
-    const node = document.getElementById("drive-caption");
     const d = driver();
-    if (!node || !d) return;
+    if (!d) return;
     const p = d.params;
     const over = Math.round(p.speeding_bias * 100);
-    node.textContent = `${d.vehicle_name}. Pulls away at ${p.accel_mps2} m/s², brakes at ${p.brake_mps2} m/s². Self-drive settles near ${p.cruise_kmh} km/h, and will hold about ${over}% over a limit. Doors ${p.door_cycles_per_trip}, windows ${p.window_changes_per_trip}, shifts ${p.gear_shifts_per_trip}.`;
+    const text = `${d.vehicle_name}. Pulls away at ${p.accel_mps2} m/s², brakes at ${p.brake_mps2} m/s². Self-drive settles near ${p.cruise_kmh} km/h, and will hold about ${over}% over a limit. Doors ${p.door_cycles_per_trip}, windows ${p.window_changes_per_trip}, shifts ${p.gear_shifts_per_trip}.`;
+    for (const id of ["drive-caption", "drive3d-caption"]) {
+      const node = document.getElementById(id);
+      if (node) node.textContent = text;
+    }
   }
 
-  function setActive(on) {
-    active = !!on;
+  function setActive(name) {
+    if (name === true) name = "drive";
+    view = name === "drive" || name === "drive3d" ? name : "";
+    active = !!view;
     if (!mounted) return;
     if (!active) return;
     refresh();
@@ -570,17 +685,21 @@
   }
 
   function resize() {
-    if (!canvas || !active) return;
-    const width = canvas.parentElement.clientWidth || 800;
+    if (!active) return;
+    const node = view === "drive3d" ? canvas3 : canvas;
+    const context = view === "drive3d" ? ctx3 : ctx;
+    if (!node || !context) return;
+    const width = node.parentElement.clientWidth || 800;
     const height = width < 720 ? 460 : 560;
     const dpr = Math.min(2, window.devicePixelRatio || 1);
-    canvas.style.width = "100%";
-    canvas.style.height = `${height}px`;
-    canvas.width = Math.max(1, Math.floor(width * dpr));
-    canvas.height = Math.floor(height * dpr);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    px = Math.max(2.4, (width - width * 0.24 - 80) / 200);
-    draw();
+    node.style.width = "100%";
+    node.style.height = `${height}px`;
+    node.width = Math.max(1, Math.floor(width * dpr));
+    node.height = Math.floor(height * dpr);
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (view !== "drive3d") px = Math.max(2.4, (width - width * 0.24 - 80) / 200);
+    if (view === "drive3d") draw3d();
+    else draw();
   }
 
   function frame(now) {
@@ -591,18 +710,23 @@
     const dt = Math.min(0.05, (now - last) / 1000 || 0);
     last = now;
     step(dt);
-    draw();
+    if (view === "drive3d") draw3d();
+    else draw();
     syncButtons();
-    const readout = document.getElementById("drive-readout");
     const d = driver();
-    if (readout && d) {
+    if (d) {
       const open = Object.values(sim.doors).some((v) => v > 0.4);
       const warn = [];
       if (open && kmh() > 3) warn.push("door open while moving");
       if (!sim.belt && kmh() > 8) warn.push("belt off");
       if (!sim.locked && sim.arrived) warn.push("left unlocked");
       if (kmh() > PATHS[sim.path].limit + 1 && sim.gear === "D") warn.push("over the limit");
-      readout.textContent = `${d.name} · ${sim.mode === "auto" ? "self-drive" : "manual"} · ${PATHS[sim.path].name} · ${kmh().toFixed(0)} km/h · ${sim.gear} · ${(sim.meters / 1000).toFixed(2)} / 1.00 km${warn.length ? " · " + warn.join(", ") : ""}`;
+      const laneName = sim.laneAnim < -0.35 ? "left lane" : "right lane";
+      const text = `${d.name} · ${sim.mode === "auto" ? "self-drive" : "manual"} · ${PATHS[sim.path].name} · ${laneName} · ${kmh().toFixed(0)} km/h · ${sim.gear} · ${(sim.meters / 1000).toFixed(2)} / 1.00 km${warn.length ? " · " + warn.join(", ") : ""}`;
+      for (const id of ["drive-readout", "drive3d-readout"]) {
+        const readout = document.getElementById(id);
+        if (readout) readout.textContent = text;
+      }
     }
     requestAnimationFrame(frame);
   }
@@ -630,7 +754,11 @@
       if (sim.speed > 0) sim.speed = 0;
     }
     crossObstacles();
+    resolveContacts();
+    updateLane(dt);
     noteVision();
+    sim.longAccel = (sim.speed - sim.prevSpeed) / Math.max(dt, 0.016);
+    sim.prevSpeed = sim.speed;
     sim.prevMeters = sim.meters;
     if (sim.mode === "manual" && sim.meters >= 1000 && !sim.arrived) {
       sim.arrived = true;
@@ -723,7 +851,13 @@
       sim.speed = 0;
       return;
     }
+    if (Object.keys(sim.hitIds).length) {
+      sim.speed = 0;
+      sim.aebHold = true;
+      return;
+    }
     habitsWhileMoving();
+    considerAvoid();
     const target = desiredMs();
     if (sim.speed < target - 0.12) {
       let a = p.accel_mps2;
@@ -778,13 +912,12 @@
           target = Math.min(target, over);
           if (late && dist < 26) sim.hardStop = true;
         }
-      } else if (dist < 88) {
-        const alt = clearPath(obs.m);
-        if (alt != null && alt !== sim.path && dist < 78) {
-          sim.path = alt;
-          pushLog(`Around the hurdle, onto ${PATHS[alt].name}`);
-        } else if (dist < 48) target = Math.min(target, 10);
       }
+    }
+    if (sim.aebHold) {
+      target = 0;
+      sim.hardStop = true;
+      sim.aebUntil = performance.now() + 400;
     }
     const left = 1000 - sim.meters;
     if (left < 90) target = Math.min(target, 22);
@@ -792,26 +925,12 @@
     return target / 3.6;
   }
 
-  function clearPath(meter) {
-    const order = [sim.path - 1, sim.path + 1, 0, 1, 2];
-    for (const i of order) {
-      if (i < 0 || i > 2 || i === sim.path) continue;
-      const blocked = PATHS[i].obstacles.some((o) => {
-        const dist = o.m - meter;
-        if (o.kind === "hurdle") return Math.abs(dist) < 40;
-        return dist > -8 && dist < 60;
-      });
-      if (!blocked) return i;
-    }
-    return null;
-  }
-
   function crossObstacles() {
     const path = PATHS[sim.path];
     for (const obs of path.obstacles) {
       const forward = sim.prevMeters < obs.m && sim.meters >= obs.m;
       const back = sim.prevMeters > obs.m && sim.meters <= obs.m;
-      if (!forward && !back) continue;
+      if (!forward && !back || obs.kind !== "breaker") continue;
       const speedKmh = kmh();
       if (obs.kind === "breaker") {
         sim.bounce = 1;
@@ -823,16 +942,191 @@
         } else {
           pushLog(`Speed breaker at ${obs.m} m, eased over`);
         }
-      } else if (speedKmh > 16) {
-        sim.speed = 0;
-        sim.shake = 1.2;
-        sim.meters = forward ? obs.m - 1.4 : obs.m + 1.4;
-        sim.hits.hurdles += 1;
-        pushLog(`Hurdle at ${obs.m} m. Stopped — slow down or take another path.`);
-      } else {
-        sim.bounce = 0.4;
-        pushLog(`Crept past the hurdle at ${obs.m} m`);
       }
+    }
+  }
+
+  const LANE = 1.15;
+
+  function carWorldX() {
+    return roadCenter(sim.pathAnim) + sim.laneAnim * LANE;
+  }
+
+  function roadActors(index) {
+    const cx = roadCenter(index);
+    const spec = VISION[PATHS[index].name];
+    const list = [];
+    for (const obs of PATHS[index].obstacles) {
+      if (obs.kind !== "hurdle") continue;
+      list.push({ id: `hurdle-${obs.m}`, kind: "hurdle", label: "hurdle", m: obs.m, x: cx + LANE, halfL: 0.5, halfW: 1.15, avoid: obs.avoid !== false });
+    }
+    if (!spec) return list;
+    for (const ped of spec.pedestrian) {
+      const meter = ped[0];
+      const crosses = ped[1];
+      const stepping = crosses && Math.abs(sim.meters - meter) < 18;
+      list.push({
+        id: `ped-${meter}`,
+        kind: "pedestrian",
+        label: crosses ? "pedestrian" : "pedestrian on the sidewalk",
+        m: meter,
+        x: stepping || crosses ? cx + LANE : cx + 4.6,
+        hitX: stepping ? cx + LANE : cx + 4.6,
+        halfL: 0.35,
+        halfW: 0.4,
+        avoid: ped.length < 3 ? true : ped[2] !== false,
+        anticipate: !!crosses,
+      });
+    }
+    const leadZ = spec.lead[0] + sim.meters * spec.lead[1];
+    list.push({ id: "lead", kind: "vehicle", label: "vehicle ahead", m: leadZ, x: cx + LANE, halfL: 2.3, halfW: 0.95, avoid: spec.leadAvoid !== false });
+    if (spec.oncoming) {
+      list.push({
+        id: "oncoming",
+        kind: "vehicle",
+        label: "oncoming vehicle",
+        m: spec.oncoming[0] - sim.meters * spec.oncoming[1],
+        x: cx - 2.55,
+        halfL: 2.3,
+        halfW: 0.95,
+        avoid: true,
+      });
+    }
+    return list;
+  }
+
+  function actorHitX(actor) {
+    return actor.hitX != null ? actor.hitX : actor.x;
+  }
+
+  function beginLaneChange(target) {
+    if (sim.laneTarget === target) return;
+    const dir = target < sim.laneAnim ? "left" : "right";
+    sim.laneTarget = target;
+    sim.blinker = dir;
+    sim.blinkUntil = performance.now() + 3200;
+    const signal = dir === "left" ? "TurnSignalStateLeft" : "TurnSignalStateRight";
+    const side = dir === "left" ? "Left" : "Right";
+    const autopilot = sim.mode === "auto" && PATHS[sim.path].limit >= 80 && params().autopilot_share >= 0.35;
+    pushLog(`Lane change ${dir}. Tesla LightsTurnSignal ${signal}, AutopilotActive ${autopilot}. VSS Vehicle.Body.Lights.DirectionIndicator.${side}.IsSignaling. LateralAcceleration is on the samples while the indicator is on.`, {
+      object: "lane",
+      tesla: {
+        LightsTurnSignal: signal,
+        AutopilotActive: autopilot,
+        AutomaticEmergencyBrakingOff: false,
+      },
+      vss: {
+        "Vehicle.Body.Lights.DirectionIndicator.Left.IsSignaling": dir === "left",
+        "Vehicle.Body.Lights.DirectionIndicator.Right.IsSignaling": dir === "right",
+      },
+    });
+  }
+
+  function considerAvoid() {
+    if (sim.mode !== "auto" || sim.phase !== "cruise") return;
+    const actors = roadActors(sim.path).filter((actor) => actor.anticipate !== false);
+    const holding = actors.find((actor) => actor.id === sim.dodgeId);
+    if (holding && holding.m > sim.meters - 6) return;
+    sim.dodgeId = "";
+    sim.aebHold = false;
+    const laneX = roadCenter(sim.path) + sim.laneTarget * LANE;
+    const threats = actors.filter((actor) => {
+      const dist = actor.m - sim.meters;
+      if (dist < 8 || dist > 72) return false;
+      return Math.abs(actor.x - laneX) < 0.95 + actor.halfW;
+    }).sort((a, b) => a.m - b.m);
+    if (!threats.length) {
+      if (sim.laneTarget !== 1) {
+        const homeX = roadCenter(sim.path) + LANE;
+        const blocked = actors.some((actor) => {
+          const dist = actor.m - sim.meters;
+          if (dist < 8 || dist > 60) return false;
+          if (actor.avoid === false) return false;
+          return Math.abs(actor.x - homeX) < 0.95 + actor.halfW;
+        });
+        if (!blocked) beginLaneChange(1);
+      }
+      return;
+    }
+    const threat = threats[0];
+    const dodge = sim.policy === "avoid" || threat.avoid;
+    if (!dodge) return;
+    const other = sim.laneTarget > 0 ? -1 : 1;
+    const otherX = roadCenter(sim.path) + other * LANE;
+    const blocked = actors.some((actor) => {
+      if (actor.id === threat.id) return false;
+      if (actor.avoid === false) return false;
+      if (Math.abs(actor.m - threat.m) > 16) return false;
+      return Math.abs(actor.x - otherX) < 0.95 + actor.halfW;
+    });
+    if (blocked) {
+      sim.aebHold = true;
+      if (!sim.seen[`aeb-${threat.id}`]) {
+        sim.seen[`aeb-${threat.id}`] = true;
+        pushLog(`Automatic emergency braking for ${threat.label}. Tesla BrakePedal true, AutomaticEmergencyBrakingOff false. VSS Vehicle.ADAS.ABS.IsEngaged.`, {
+          object: threat.kind,
+          tesla: { BrakePedal: true, AutomaticEmergencyBrakingOff: false, LongitudinalAcceleration: -4.5 },
+          vss: { "Vehicle.ADAS.ABS.IsEngaged": true, "Vehicle.Chassis.Brake.PedalPosition": 80 },
+        });
+      }
+      return;
+    }
+    beginLaneChange(other);
+    sim.dodgeId = threat.id;
+  }
+
+  function updateLane(dt) {
+    const before = sim.laneAnim;
+    sim.laneAnim = toward(sim.laneAnim, sim.laneTarget, dt * 1.4);
+    sim.latAccel = Math.max(-3.2, Math.min(3.2, ((sim.laneAnim - before) / Math.max(dt, 0.016)) * 1.7));
+    if (Math.abs(sim.laneAnim - sim.laneTarget) < 0.08 && performance.now() > sim.blinkUntil) sim.blinker = "off";
+  }
+
+  function resolveContacts() {
+    if (sim.gear !== "D" && sim.gear !== "R") return;
+    const carX = carWorldX();
+    for (const actor of roadActors(sim.path)) {
+      const hx = actorHitX(actor);
+      const along = Math.abs(actor.m - sim.meters);
+      const side = Math.abs(hx - carX);
+      if (along >= 2.15 + actor.halfL || side >= 0.93 + actor.halfW) continue;
+      const approach = sim.speed;
+      const gap = 2.15 + actor.halfL;
+      if (kmh() < 4) {
+        if (approach > 0) sim.meters = Math.min(sim.meters, actor.m - gap);
+        if (approach < 0) sim.meters = Math.max(sim.meters, actor.m + gap);
+        sim.speed = 0;
+        continue;
+      }
+      if (sim.hitIds[actor.id]) {
+        sim.speed = 0;
+        continue;
+      }
+      sim.hitIds[actor.id] = true;
+      sim.speed = 0;
+      sim.shake = 1.2;
+      sim.hazard = true;
+      sim.meters = approach >= 0 ? actor.m - gap : actor.m + gap;
+      sim.impactAccel = actor.kind === "pedestrian" ? -6.4 : -7.5;
+      sim.impactUntil = performance.now() + 1400;
+      sim.aebUntil = sim.impactUntil;
+      sim.hits.hurdles += 1;
+      pushLog(`Collision with ${actor.label}. Tesla BrakePedal true, LongitudinalAcceleration ${sim.impactAccel} m/s^2, LateralAcceleration ${sim.latAccel.toFixed(2)} m/s^2, AutomaticEmergencyBrakingOff false, LightsHazardsActive true. VSS Vehicle.ADAS.ABS.IsEngaged, Vehicle.ADAS.ESC.IsEngaged.`, {
+        object: actor.kind,
+        tesla: {
+          BrakePedal: true,
+          LongitudinalAcceleration: sim.impactAccel,
+          LateralAcceleration: Math.round(sim.latAccel * 100) / 100,
+          AutomaticEmergencyBrakingOff: false,
+          LightsHazardsActive: true,
+        },
+        vss: {
+          "Vehicle.ADAS.ABS.IsEngaged": true,
+          "Vehicle.ADAS.ESC.IsEngaged": true,
+          "Vehicle.Chassis.Brake.PedalPosition": 100,
+          "Vehicle.Acceleration.Longitudinal": sim.impactAccel,
+        },
+      });
     }
   }
 
@@ -876,10 +1170,79 @@
   function toggleAuto() {
     if (sim.mode === "auto" && sim.phase !== "arrive") {
       takeWheel();
+      hidePolicy();
       window.Relay.setStatus("Self-drive off. Arrow keys drive.");
       return;
     }
+    document.querySelectorAll("[data-role='policy']").forEach((node) => {
+      node.hidden = false;
+    });
+    window.Relay.setStatus("Choose avoid collisions, or hybrid.");
+  }
+
+  function hidePolicy() {
+    document.querySelectorAll("[data-role='policy']").forEach((node) => {
+      node.hidden = true;
+    });
+  }
+
+  function choosePolicy(policy) {
+    hidePolicy();
+    sim.policy = policy;
     startAuto();
+    applyPolicy(policy);
+    window.Relay.setStatus(policy === "avoid" ? "Self-drive will change lanes to avoid collisions." : "Hybrid self-drive avoids some and collides with others.");
+  }
+
+  function applyPolicy(policy) {
+    sim.policy = policy;
+    for (const path of PATHS) {
+      const hurdles = path.obstacles.filter((obs) => obs.kind === "hurdle");
+      for (const obs of hurdles) obs.avoid = policy === "avoid";
+      const spec = VISION[path.name];
+      if (spec) {
+        spec.pedestrian = spec.pedestrian.map((ped) => [ped[0], ped[1], policy === "avoid" || !ped[1]]);
+        spec.leadAvoid = policy === "avoid";
+      }
+      if (policy !== "hybrid") continue;
+      const items = hurdles.map((obs) => ({ m: obs.m, name: `hurdle at ${obs.m} m`, set: (value) => { obs.avoid = value; } }));
+      if (spec) {
+        spec.pedestrian.forEach((ped, i) => {
+          if (!ped[1]) return;
+          items.push({ m: ped[0], name: `pedestrian at ${ped[0]} m`, set: (value) => { spec.pedestrian[i][2] = value; } });
+        });
+        items.push({ m: spec.lead[0], name: "vehicle ahead", set: (value) => { spec.leadAvoid = value; } });
+      }
+      if (!items.length) continue;
+      items.sort((a, b) => a.m - b.m);
+      if (items.length === 1) items[0].set(false);
+      else {
+        items.forEach((item) => item.set(true));
+        items[1].set(false);
+        for (let i = 2; i < items.length; i += 1) items[i].set(Math.random() < 0.5);
+      }
+    }
+    noteHybrid(policy);
+  }
+
+  function noteHybrid(policy) {
+    if (policy !== "hybrid") return;
+    const path = PATHS[sim.path];
+    const spec = VISION[path.name];
+    const dodge = [];
+    const hit = [];
+    for (const obs of path.obstacles) {
+      if (obs.kind !== "hurdle") continue;
+      (obs.avoid === false ? hit : dodge).push(`hurdle at ${obs.m} m`);
+    }
+    if (spec) {
+      for (const ped of spec.pedestrian) {
+        if (!ped[1]) continue;
+        (ped[2] === false ? hit : dodge).push(`pedestrian at ${ped[0]} m`);
+      }
+      (spec.leadAvoid === false ? hit : dodge).push("vehicle ahead");
+    }
+    pushLog(`Hybrid. Lane change for ${dodge.join(", ") || "nothing"}. Collision for ${hit.join(", ") || "nothing"}.`);
   }
 
   function startAuto() {
@@ -911,7 +1274,7 @@
   }
 
   async function addDriver() {
-    const input = document.getElementById("drive-new-name");
+    const input = document.getElementById(view === "drive3d" ? "drive3d-new-name" : "drive-new-name");
     const name = input.value.trim();
     if (!name) {
       window.Relay.setStatus("Type a name, then add the driver.");
@@ -929,7 +1292,8 @@
       window.Relay.renderFleet();
       window.Relay.renderDriver();
       window.Relay.renderRun();
-      input.value = "";
+      document.getElementById("drive-new-name").value = "";
+      document.getElementById("drive3d-new-name").value = "";
       refresh();
       sim.driverId = created.id;
       resetCar();
@@ -989,16 +1353,20 @@
     };
     for (const [id] of DOORS) pressed[`door-${id}`] = sim.doorTarget[id] > 0.5;
     for (let i = 0; i < 3; i++) pressed[`path-${i}`] = sim.path === i;
-    document.querySelectorAll("#panel-drive [data-ctl]").forEach((node) => {
+    document.querySelectorAll("#panel-drive [data-ctl], #panel-drive3d [data-ctl]").forEach((node) => {
       const on = !!pressed[node.dataset.ctl];
       if (node.dataset.ctl.startsWith("mode-") || node.dataset.ctl.startsWith("gear-") || node.dataset.ctl.startsWith("door-") || node.dataset.ctl.startsWith("path-") || ["mirrors", "wipers", "belt", "lock", "lamps", "high", "hazard"].includes(node.dataset.ctl)) {
         node.setAttribute("aria-pressed", on ? "true" : "false");
       }
     });
-    const autoBtn = document.querySelector('#panel-drive [data-ctl="mode-auto"]');
-    if (autoBtn) autoBtn.textContent = sim.mode === "auto" && sim.phase !== "arrive" ? "Stop self-drive" : "Self-drive";
-    const mirrorBtn = document.querySelector('#panel-drive [data-ctl="mirrors"]');
-    if (mirrorBtn) mirrorBtn.textContent = sim.mirrorsFolded ? "Unfold mirrors" : "Fold mirrors";
+    const autoLabel = sim.mode === "auto" && sim.phase !== "arrive" ? "Stop self-drive" : "Self-drive";
+    document.querySelectorAll('#panel-drive [data-ctl="mode-auto"], #panel-drive3d [data-ctl="mode-auto"]').forEach((node) => {
+      node.textContent = autoLabel;
+    });
+    const mirrorLabel = sim.mirrorsFolded ? "Unfold mirrors" : "Fold mirrors";
+    document.querySelectorAll('#panel-drive [data-ctl="mirrors"], #panel-drive3d [data-ctl="mirrors"]').forEach((node) => {
+      node.textContent = mirrorLabel;
+    });
   }
 
   function geom(height) {
@@ -1112,6 +1480,10 @@
     ctx.fillText(path.name, 12, top + 20);
     ctx.font = "12px Segoe UI, sans-serif";
     ctx.fillText(`${path.limit} km/h`, 12, top + 38);
+    if (selected) {
+      ctx.fillStyle = "#d08a3a";
+      ctx.fillText(sim.laneAnim < -0.35 ? "Left lane" : "Right lane", 78, top + 20);
+    }
     if (selected && path.limit >= 80 && params().autopilot_share >= 0.35 && sim.mode === "auto") {
       ctx.fillStyle = "rgba(143, 206, 122, 0.85)";
       ctx.fillText("Autosteer", 78, top + 38);
@@ -1119,9 +1491,9 @@
   }
 
   const VISION = {
-    Street: { parked: [[45, 1], [620, -1]], pedestrian: [[130, true], [740, true]], lead: [80, 0.72], oncoming: null, bays: [968, 986] },
-    Avenue: { parked: [[160, 1], [640, -1]], pedestrian: [[390, true]], lead: [120, 0.78], oncoming: [940, 1.05], bays: [972] },
-    "Ring road": { parked: [], pedestrian: [[200, false]], lead: [140, 0.82], oncoming: null, bays: [984] },
+    Street: { parked: [[45, 1], [620, -1]], pedestrian: [], lead: [80, 0.72], oncoming: null, bays: [968, 986] },
+    Avenue: { parked: [[160, 1], [640, -1]], pedestrian: [], lead: [120, 0.78], oncoming: [940, 1.05], bays: [972] },
+    "Ring road": { parked: [], pedestrian: [], lead: [140, 0.82], oncoming: null, bays: [984] },
   };
 
   function noteVision() {
@@ -1328,7 +1700,11 @@
     const braking = (keys.down || pad.down || keys.brake || sim.hardStop) && kmh() > 2;
     const paint = (driver() && driver().color) || "#d08a3a";
     ctx.save();
-    ctx.translate(carX, ground - hop);
+    ctx.translate(carX, ground - hop + sim.laneAnim * 10);
+    if (sim.blinker !== "off" && Math.floor(performance.now() / 280) % 2 === 0) {
+      ctx.fillStyle = "#ffb03a";
+      ctx.fillRect(sim.blinker === "left" ? 168 : 24, -64, 10, 6);
+    }
     ctx.fillStyle = "rgba(0,0,0,0.35)";
     ctx.beginPath();
     ctx.ellipse(96, 4, 78, 8, 0, 0, Math.PI * 2);
@@ -1546,6 +1922,312 @@
     const num = parseInt(raw.length === 3 ? raw.split("").map((c) => c + c).join("") : raw, 16);
     const ch = (shift) => Math.max(0, Math.min(255, ((num >> shift) & 255) + amt));
     return `rgb(${ch(16)}, ${ch(8)}, ${ch(0)})`;
+  }
+
+  function roadCenter(index) {
+    return (index - 1) * 16;
+  }
+
+  function draw3d() {
+    if (!ctx3 || !canvas3) return;
+    const g = ctx3;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const w = canvas3.width / dpr;
+    const h = canvas3.height / dpr;
+    if (w < 2 || h < 2) return;
+    const camX = carWorldX();
+    const camY = 2.05 + Math.max(0, sim.bounce) * 0.45;
+    const camZ = sim.meters - 6.4;
+    const focal = Math.min(w, h) * 1.08;
+    const horizon = h * 0.40;
+    const yaw = (sim.path - sim.pathAnim) * 0.42;
+
+    function project(x, y, z) {
+      const dz = z - camZ;
+      if (dz < 0.5) return null;
+      return {
+        x: w / 2 + ((x - camX) / dz) * focal,
+        y: horizon - ((y - camY) / dz) * focal,
+        s: focal / dz,
+      };
+    }
+
+    function toWorld(lx, ly, lz, cx, cz, turn) {
+      const c = Math.cos(turn);
+      const s = Math.sin(turn);
+      return [cx + lx * c + lz * s, ly, cz - lx * s + lz * c];
+    }
+
+    const faces = [];
+    function addFace(pts, color) {
+      let z = 0;
+      for (const p of pts) z += p[2];
+      faces.push({ pts, color, z: z / pts.length });
+    }
+
+    function addBox(x, y, z, sx, sy, sz, color) {
+      const x0 = x - sx / 2;
+      const x1 = x + sx / 2;
+      const y0 = y;
+      const y1 = y + sy;
+      const z0 = z - sz / 2;
+      const z1 = z + sz / 2;
+      addFace([[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]], shade(color, 36));
+      addFace([[x0, y0, z1], [x1, y0, z1], [x1, y0, z0], [x0, y0, z0]], shade(color, -50));
+      addFace([[x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0]], color);
+      addFace([[x1, y0, z1], [x0, y0, z1], [x0, y1, z1], [x1, y1, z1]], shade(color, -28));
+      addFace([[x0, y0, z1], [x0, y0, z0], [x0, y1, z0], [x0, y1, z1]], shade(color, -16));
+      addFace([[x1, y0, z0], [x1, y0, z1], [x1, y1, z1], [x1, y1, z0]], shade(color, 10));
+    }
+
+    const sky = g.createLinearGradient(0, 0, 0, horizon + 20);
+    sky.addColorStop(0, "#1a2744");
+    sky.addColorStop(0.55, "#8a5a48");
+    sky.addColorStop(1, "#e4bc8a");
+    g.fillStyle = sky;
+    g.fillRect(0, 0, w, h);
+    g.fillStyle = "rgba(255, 214, 160, 0.92)";
+    g.beginPath();
+    g.arc(w * 0.78, horizon * 0.42, 18, 0, Math.PI * 2);
+    g.fill();
+    g.fillStyle = "#163224";
+    g.fillRect(0, horizon - 2, w, h - horizon + 2);
+
+    const zNear = sim.meters - 2;
+    const zFar = sim.meters + 170;
+    for (let i = 0; i < 3; i++) {
+      const cx = roadCenter(i);
+      const selected = i === sim.path;
+      const asphalt = selected ? "#4a5144" : "#34382f";
+      const verge = i === 2 ? "#1e3344" : i === 1 ? "#2a2618" : "#1c3328";
+      for (let z = zFar; z > zNear; z -= 10) {
+        const z0 = z - 10;
+        addFace([[cx - 22, 0, z0], [cx + 22, 0, z0], [cx + 22, 0, z], [cx - 22, 0, z]], verge);
+        addFace([[cx - 3.7, 0.02, z0], [cx + 3.7, 0.02, z0], [cx + 3.7, 0.02, z], [cx - 3.7, 0.02, z]], asphalt);
+        addFace([[cx - 3.7, 0.03, z0], [cx - 3.45, 0.03, z0], [cx - 3.45, 0.03, z], [cx - 3.7, 0.03, z]], "#d08a3a");
+        addFace([[cx + 3.45, 0.03, z0], [cx + 3.7, 0.03, z0], [cx + 3.7, 0.03, z], [cx + 3.45, 0.03, z]], "#d08a3a");
+        if (Math.floor(z / 10) % 2 === 0) {
+          addFace([[cx - 0.12, 0.04, z0 + 2], [cx + 0.12, 0.04, z0 + 2], [cx + 0.12, 0.04, z0 + 6], [cx - 0.12, 0.04, z0 + 6]], "rgba(236,231,220,0.8)");
+        }
+      }
+      const scenery = i === 0 ? "tree" : i === 1 ? "shop" : "hill";
+      for (let z = Math.floor(zNear / 18) * 18; z < zFar; z += 18) {
+        const n = Math.abs(Math.sin(z * 12.9898 + i * 78.233) * 43758.5453) % 1;
+        if (scenery === "tree") {
+          addBox(cx - 6.4, 0, z, 0.45, 2.4 + n * 1.6, 0.45, "#6a4a32");
+          addBox(cx - 6.4, 2.2 + n, z, 2.4, 2.2 + n, 2.4, n > 0.5 ? "#2f6a45" : "#3d7a52");
+          addBox(cx + 6.6, 0, z + 8, 0.4, 2.1, 0.4, "#6a4a32");
+          addBox(cx + 6.6, 1.9, z + 8, 2.1, 1.8, 2.1, "#2a5c3c");
+        } else if (scenery === "shop") {
+          addBox(cx + 8.2, 0, z, 5.5, 3.4 + n * 2.2, 7, n > 0.5 ? "#8d6848" : "#6e5a48");
+          addBox(cx - 8.4, 0, z + 6, 4.2, 2.8, 6, "#5c6a72");
+        } else {
+          addBox(cx - 9, 0, z, 8, 1.4 + n * 2.4, 10, "#3d5a48");
+          addBox(cx + 10, 0, z + 7, 7, 1.1 + n, 9, "#314e40");
+        }
+      }
+      for (const obs of PATHS[i].obstacles) {
+        if (obs.m < zNear - 2 || obs.m > zFar) continue;
+        if (obs.kind === "breaker") addBox(cx, 0.02, obs.m, 6.6, 0.16, 0.9, "#e2b14a");
+        else addBox(cx + LANE, 0.02, obs.m, 2.2, 0.85, 0.7, "#c4523c");
+      }
+      const spec = VISION[PATHS[i].name];
+      if (spec) {
+        for (const [meter, side] of spec.parked) addBox(cx + side * 3.15, 0.02, meter, 1.8, 1.35, 4.2, "#6d7c8a");
+        const leadZ = spec.lead[0] + sim.meters * spec.lead[1];
+        addBox(cx + LANE, 0.02, leadZ, 1.85, 1.4, 4.4, "#8fb4d4");
+        if (spec.oncoming) addBox(cx - 2.55, 0.02, spec.oncoming[0] - sim.meters * spec.oncoming[1], 1.85, 1.4, 4.4, "#c4b49a");
+        for (const [meter, crosses] of spec.pedestrian) {
+          const step = crosses && Math.abs(sim.meters - meter) < 18 ? cx + LANE : cx + 4.6;
+          addBox(step, 0.9, meter, 0.45, 0.45, 0.45, "#f4efe4");
+          addBox(step, 0, meter, 0.4, 0.9, 0.28, "#d08a3a");
+        }
+        for (const meter of spec.bays) {
+          addFace(
+            [[cx + 2.2, 0.05, meter - 2.2], [cx + 4.8, 0.05, meter - 2.2], [cx + 4.8, 0.05, meter + 2.2], [cx + 2.2, 0.05, meter + 2.2]],
+            "rgba(236,231,220,0.28)"
+          );
+        }
+      }
+      addBox(cx - 4.8, 0, 6, 0.12, 1.7, 1.3, "#f4efe4");
+      addBox(cx - 4.8, 0, 994, 0.12, 1.7, 1.3, "#8fce7a");
+    }
+
+    const d = driver();
+    const body = d && d.color ? d.color : "#8fce7a";
+    const cx = carWorldX();
+    const cz = sim.meters;
+    const blinkOn = sim.blinker !== "off" && Math.floor(performance.now() / 280) % 2 === 0;
+    function carBox(lx, ly, lz, sx, sy, sz, color) {
+      const c = Math.cos(yaw);
+      const s = Math.sin(yaw);
+      const corners = [];
+      for (const dx of [-sx / 2, sx / 2]) {
+        for (const dy of [0, sy]) {
+          for (const dz of [-sz / 2, sz / 2]) {
+            const wx = lx + dx;
+            const wz = lz + dz;
+            corners.push(toWorld(wx * c + wz * s, ly + dy, -wx * s + wz * c, cx, cz, 0));
+          }
+        }
+      }
+      const p = (ix, iy, iz) => corners[ix * 4 + iy * 2 + iz];
+      addFace([p(0, 1, 0), p(1, 1, 0), p(1, 1, 1), p(0, 1, 1)], shade(color, 36));
+      addFace([p(0, 0, 1), p(1, 0, 1), p(1, 0, 0), p(0, 0, 0)], shade(color, -50));
+      addFace([p(0, 0, 0), p(1, 0, 0), p(1, 1, 0), p(0, 1, 0)], color);
+      addFace([p(1, 0, 1), p(0, 0, 1), p(0, 1, 1), p(1, 1, 1)], shade(color, -28));
+      addFace([p(0, 0, 1), p(0, 0, 0), p(0, 1, 0), p(0, 1, 1)], shade(color, -16));
+      addFace([p(1, 0, 0), p(1, 0, 1), p(1, 1, 1), p(1, 1, 0)], shade(color, 10));
+    }
+    carBox(0, 0.28, 0.05, 1.86, 0.58, 4.5, body);
+    carBox(0, 0.86, -0.25, 1.68, 0.5, 2.15, shade(body, -18));
+    carBox(0, 1.02, -1.05, 1.2, 0.34, 0.06, "#1a242c");
+    const braking = keys.brake || keys.down || pad.down;
+    const glow = sim.lights ? (sim.high ? "#fff1c2" : "#ffe08a") : null;
+    if (glow) {
+      carBox(-0.62, 0.42, 2.28, 0.28, 0.16, 0.08, glow);
+      carBox(0.62, 0.42, 2.28, 0.28, 0.16, 0.08, glow);
+    }
+    carBox(-0.62, 0.48, -2.2, 0.32, 0.16, 0.06, braking ? "#ff5a42" : "#8a2e28");
+    carBox(0.62, 0.48, -2.2, 0.32, 0.16, 0.06, braking ? "#ff5a42" : "#8a2e28");
+    const blink = Math.floor(performance.now() / 280) % 2 === 0;
+    if (sim.hazard && blink) {
+      carBox(-0.88, 0.5, 2.15, 0.12, 0.12, 0.08, "#ffb03a");
+      carBox(0.88, 0.5, 2.15, 0.12, 0.12, 0.08, "#ffb03a");
+      carBox(-0.88, 0.55, -2.15, 0.12, 0.12, 0.08, "#ffb03a");
+      carBox(0.88, 0.55, -2.15, 0.12, 0.12, 0.08, "#ffb03a");
+    } else if (blinkOn) {
+      const side = sim.blinker === "left" ? -0.9 : 0.9;
+      carBox(side, 0.5, 2.15, 0.12, 0.12, 0.08, "#ffb03a");
+      carBox(side, 0.55, -2.15, 0.12, 0.12, 0.08, "#ffb03a");
+    }
+
+    function swung(hingeLx, hingeLz, length, yawDoor, y, height, color) {
+      const c = Math.cos(yaw + yawDoor);
+      const s = Math.sin(yaw + yawDoor);
+      const hx = cx + hingeLx * Math.cos(yaw) + hingeLz * Math.sin(yaw);
+      const hz = cz - hingeLx * Math.sin(yaw) + hingeLz * Math.cos(yaw);
+      const ex = hx + length * s;
+      const ez = hz - length * c;
+      addFace(
+        [[hx, y, hz], [ex, y, ez], [ex, y + height, ez], [hx, y + height, hz]],
+        color
+      );
+    }
+    const doorOpen = (id) => sim.doors[id] > 0.04;
+    if (doorOpen("df")) swung(-0.94, 0.85, 0.92, -sim.doors.df * 1.15, 0.38, 0.72, shade(body, -8));
+    if (doorOpen("dr")) swung(-0.94, -0.15, 0.82, -sim.doors.dr * 1.15, 0.38, 0.72, shade(body, -8));
+    if (doorOpen("pf")) swung(0.94, 0.85, 0.92, sim.doors.pf * 1.15, 0.38, 0.72, shade(body, 8));
+    if (doorOpen("pr")) swung(0.94, -0.15, 0.82, sim.doors.pr * 1.15, 0.38, 0.72, shade(body, 8));
+    if (doorOpen("frunk")) addBox(cx, 0.95 + sim.doors.frunk * 0.55, cz + 1.7, 1.5, 0.06, 0.9, shade(body, 18));
+    if (doorOpen("trunk")) addBox(cx, 0.95 + sim.doors.trunk * 0.7, cz - 1.85, 1.5, 0.06, 0.85, shade(body, 12));
+
+    faces.sort((a, b) => b.z - a.z);
+    const shake = sim.shake > 0 ? Math.sin(performance.now() / 28) * 6 * sim.shake : 0;
+    g.save();
+    g.translate(shake, 0);
+    for (const face of faces) {
+      const pts = face.pts.map((p) => project(p[0], p[1], p[2]));
+      if (pts.some((p) => !p)) continue;
+      g.beginPath();
+      g.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) g.lineTo(pts[i].x, pts[i].y);
+      g.closePath();
+      g.fillStyle = face.color;
+      g.fill();
+    }
+
+    function wheel(lx, lz) {
+      const c = Math.cos(yaw);
+      const s = Math.sin(yaw);
+      const p = project(cx + lx * c + lz * s, 0.3, cz - lx * s + lz * c);
+      if (!p) return;
+      const radius = Math.max(2, p.s * 0.3);
+      g.fillStyle = "#141612";
+      g.beginPath();
+      g.arc(p.x, p.y, radius, 0, Math.PI * 2);
+      g.fill();
+      g.strokeStyle = "#c8c2b6";
+      g.lineWidth = Math.max(1, radius * 0.18);
+      g.beginPath();
+      g.arc(p.x, p.y, radius * 0.45, sim.wheel, sim.wheel + Math.PI * 1.5);
+      g.stroke();
+    }
+    wheel(-1.05, -1.55);
+    wheel(1.05, -1.55);
+
+    if (sim.lights) {
+      const reach = sim.high ? 46 : 22;
+      g.fillStyle = sim.high ? "rgba(255, 236, 190, 0.16)" : "rgba(255, 214, 140, 0.13)";
+      for (const side of [-0.55, 0.55]) {
+        const a = project(cx + side - 0.35, 0.04, cz + 2.4);
+        const b = project(cx + side + 0.35, 0.04, cz + 2.4);
+        const c0 = project(cx + side + 1.1, 0.04, cz + reach);
+        const d0 = project(cx + side - 1.1, 0.04, cz + reach);
+        if (!a || !b || !c0 || !d0) continue;
+        g.beginPath();
+        g.moveTo(a.x, a.y);
+        g.lineTo(b.x, b.y);
+        g.lineTo(c0.x, c0.y);
+        g.lineTo(d0.x, d0.y);
+        g.closePath();
+        g.fill();
+      }
+    }
+
+    if (sim.rain) {
+      g.strokeStyle = "rgba(210, 220, 230, 0.35)";
+      g.lineWidth = 1;
+      const shift = (performance.now() / 16) % 40;
+      for (let i = 0; i < 80; i++) {
+        const x = (i * 47 + shift) % (w + 30) - 10;
+        const y = (i * 29 + shift * 2) % h;
+        g.beginPath();
+        g.moveTo(x, y);
+        g.lineTo(x - 7, y + 16);
+        g.stroke();
+      }
+    }
+    if (sim.wipers) {
+      const sweep = Math.sin(sim.wiper * 2.4);
+      g.strokeStyle = "rgba(236,231,220,0.55)";
+      g.lineWidth = 3;
+      g.beginPath();
+      g.moveTo(w * 0.38, h * 0.62);
+      g.quadraticCurveTo(w * (0.46 + sweep * 0.04), h * 0.42, w * (0.58 + sweep * 0.08), h * 0.58);
+      g.stroke();
+    }
+
+    if (sim.arrived) {
+      g.fillStyle = "rgba(20, 22, 18, 0.72)";
+      g.fillRect(w / 2 - 110, 18, 220, 32);
+      g.fillStyle = "#f4efe4";
+      g.font = "600 16px Segoe UI, sans-serif";
+      g.textAlign = "center";
+      g.fillText("Arrived at B", w / 2, 40);
+    }
+
+    g.fillStyle = "rgba(16, 18, 14, 0.55)";
+    g.fillRect(10, h - 78, 360, 68);
+    g.textAlign = "left";
+    g.fillStyle = "#f4efe4";
+    g.font = "700 32px Consolas, monospace";
+    g.fillText(`${kmh().toFixed(0)}`, 18, h - 46);
+    g.font = "13px Segoe UI, sans-serif";
+    g.fillText(`km/h   ${sim.gear}   ${PATHS[sim.path].name}   ${PATHS[sim.path].limit} limit`, 18, h - 26);
+    g.fillText(`${(sim.meters / 1000).toFixed(2)} / 1.00 km${d ? "   " + d.name : ""}`, 18, h - 8);
+    const bits = [];
+    if (sim.lights) bits.push(sim.high ? "High beam" : "Lamps");
+    if (sim.wipers) bits.push("Wipers");
+    if (!sim.belt) bits.push("Belt off");
+    if (!sim.locked) bits.push("Unlocked");
+    if (sim.window > 0.2) bits.push("Windows down");
+    if (bits.length) {
+      g.textAlign = "right";
+      g.fillStyle = "#f4efe4";
+      g.fillText(bits.join("  ·  "), w - 16, h - 12);
+    }
+    g.restore();
   }
 
   window.Drive = { mount, refresh, setActive, resize };

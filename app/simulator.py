@@ -178,6 +178,7 @@ class State:
     stator_c: float = 28.0
     module_c: float = 26.0
     heading_bias: float = 0.0
+    aeb: bool = False
     origin: tuple = (0.0, 0.0)
     dest: tuple = (0.0, 0.0)
     planned_m: float = 1.0
@@ -726,6 +727,8 @@ def build_document(state: State):
         "Vehicle.TraveledDistance": int(state.odometer_km * 1000),
         "Vehicle.ADAS.CruiseControl.SpeedSet": _num(state.cruise_kmh, 1) if state.autopilot else 0,
         "Vehicle.ADAS.CruiseControl.IsActive": state.autopilot,
+        "Vehicle.ADAS.ABS.IsEngaged": bool(state.aeb or state.brake_pct >= 70),
+        "Vehicle.ADAS.ESC.IsEngaged": bool(state.aeb or abs(state.lat_accel) >= 2.2),
         "Vehicle.Powertrain.TractionBattery.StateOfCharge.Current": _num(state.soc, 2),
         "Vehicle.Powertrain.TractionBattery.CurrentVoltage": _num(state.pack_voltage, 2),
         "Vehicle.Powertrain.TractionBattery.CurrentCurrent": _num(state.pack_current, 2),

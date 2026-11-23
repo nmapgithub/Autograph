@@ -86,6 +86,9 @@ class DriveSampleBody(BaseModel):
     trunk: bool = False
     autopilot: bool = False
     mode: str = "manual"
+    lat_accel: float = 0
+    turn: str = "TurnSignalStateOff"
+    aeb: bool = False
 
 
 class DriveEventBody(BaseModel):
@@ -95,6 +98,7 @@ class DriveEventBody(BaseModel):
     severity: str = "info"
     speed_kmh: float = 0
     gear: str = "P"
+    fields: dict = Field(default_factory=dict)
 
 
 class OpenSearchBody(BaseModel):
@@ -323,8 +327,11 @@ def run_detail(run_id: str):
     series = []
     if series_rel:
         path = ROOT / series_rel
-        if path.is_file():
-            series = json.loads(path.read_text(encoding="utf-8"))
+        if path.is_file() and path.stat().st_size:
+            try:
+                series = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                series = []
     events = _read_events(run)
     return {"run": _public_run(run), "ueba": run.get("ueba"), "series": series, "events": events, "example": run.get("example")}
 
@@ -472,5 +479,8 @@ def _read_events(run):
     with path.open(encoding="utf-8") as handle:
         for line in handle:
             if line.strip():
-                events.append(json.loads(line))
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
     return events

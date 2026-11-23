@@ -1,6 +1,7 @@
 services:
   autograph:
     build: .
+    image: autograph:latest
     ports:
       - "8000:8000"
     volumes:

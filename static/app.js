@@ -2,7 +2,8 @@ const TABS = [
   ["fleet", "Fleet"],
   ["driver", "Driver"],
   ["run", "Run"],
-  ["drive", "Drive"],
+  ["drive", "2D Drive"],
+  ["drive3d", "3D Drive"],
   ["timeline", "Timeline"],
   ["logs", "Logs"],
   ["ueba", "UEBA"],
@@ -92,7 +93,7 @@ function showTab(name) {
   document.querySelectorAll("#nav button").forEach((btn) => {
     btn.setAttribute("aria-selected", btn.dataset.tab === name ? "true" : "false");
   });
-  if (window.Drive) Drive.setActive(name === "drive");
+  if (window.Drive) Drive.setActive(name === "drive" || name === "drive3d" ? name : false);
   if (name === "timeline") {
     if (!state.view && state.runs.length) {
       hydrateLatest().then(() => {
@@ -809,7 +810,7 @@ function renderLogs() {
   const panel = $("panel-logs");
   panel.textContent = "";
   panel.appendChild(el("h2", "Logs"));
-  panel.appendChild(el("p", "Telemetry rows as they will sit in OpenSearch. Open a row for the Tesla fields, the VSS tree, the camera tracks, and the CAN frames. A Drive-tab trip shows up here as manual or self-drive. The Seen column is what the cameras reported: vehicles, pedestrians, obstacles, curbs, parking, and who is in the cabin.", "lede"));
+  panel.appendChild(el("p", "Telemetry rows as they will sit in OpenSearch. Open a row for the Tesla fields, the VSS tree, the camera tracks, and the CAN frames. A 2D or 3D Drive trip shows up here as manual or self-drive. The Seen column is what the cameras reported: vehicles, pedestrians, obstacles, curbs, parking, and who is in the cabin.", "lede"));
   const row = el("div", null, "row");
   const pick = document.createElement("select");
   pick.id = "log-run";
@@ -955,7 +956,11 @@ async function noteDrive(run) {
 
 async function hydrateLatest() {
   if (state.view || !state.runs.length) return;
-  state.view = await api(`/api/runs/${state.runs[0].id}`);
+  try {
+    state.view = await api(`/api/runs/${state.runs[0].id}`);
+  } catch (_err) {
+    state.view = null;
+  }
 }
 
 function renderUeba() {
@@ -1141,7 +1146,7 @@ async function boot() {
   window.addEventListener("resize", () => {
     if (state.tab === "timeline") drawCharts();
     if (state.tab === "ueba") drawScoreChart();
-    if (state.tab === "drive" && window.Drive) Drive.resize();
+    if ((state.tab === "drive" || state.tab === "drive3d") && window.Drive) Drive.resize();
   });
 }
 
