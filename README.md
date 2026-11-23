@@ -18,6 +18,42 @@ Port 8000 must be free. On Ubuntu, files in `data/` are written as root, so read
 
 A Python install, without Docker, is described under Install and Run.
 
+## The interface
+
+**Fleet.** Three drivers, with a day run for one person or the whole fleet.
+
+![Fleet](docs/screenshots/fleet.png)
+
+**Driver.** These numbers are the signature. Cruise, braking, doors, windows, belt, lock, and charge are saved here and used by both a generated day and self-drive.
+
+![Driver parameters](docs/screenshots/driver.png)
+
+**Run.** Pick one commute, a full day, or a timed drive. The interval, the calendar day, and the seed are here.
+
+![Run a day](docs/screenshots/run.png)
+
+**Drive.** Gear, doors, windows, wipers, belt, lock, and lamps are buttons. Arrow keys drive. Street, Avenue, and Ring road are each 1.0 km, and self-drive uses the saved style.
+
+![Drive controls](docs/screenshots/drive.png)
+
+**Timeline.** Speed against the posted limit, state of charge, and the habit numbers for the open run.
+
+![Timeline](docs/screenshots/timeline.png)
+
+**Logs.** Every run is in the list. Export all downloads one OpenSearch bulk file. Push to OpenSearch asks for the protocol, host, port, username, password, and the two index names, then sends every log.
+
+![Logs and OpenSearch](docs/screenshots/logs.png)
+
+**UEBA.** The absolute score is the bar. The table is the same day in numbers: speed, hard brakes, shifts, doors, belt, and the rest.
+
+![UEBA scores](docs/screenshots/ueba.png)
+
+**Signals.** How a row is produced, then the catalog that maps each Tesla field to a VSS path and a unit.
+
+![How the logs are produced](docs/screenshots/signals.png)
+
+![Signal catalog](docs/screenshots/catalog.png)
+
 ## What you get
 
 Three drivers are created the first time the app starts:
