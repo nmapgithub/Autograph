@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Autograph — vehicle telemetry lab</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="mark">Autograph</span>
+      <span class="sub">A driver's signature, written as car telemetry</span>
+    </div>
+    <nav id="nav" class="nav"></nav>
+  </header>
+  <p id="status" class="status" role="status"></p>
+  <main>
+    <section id="panel-fleet" class="panel"></section>
+    <section id="panel-driver" class="panel" hidden></section>
+    <section id="panel-run" class="panel" hidden></section>
+    <section id="panel-drive" class="panel" hidden></section>
+    <section id="panel-timeline" class="panel" hidden></section>
+    <section id="panel-logs" class="panel" hidden></section>
+    <section id="panel-ueba" class="panel" hidden></section>
+    <section id="panel-signals" class="panel" hidden></section>
+  </main>
+  <script src="/static/drive.js?v=10"></script>
+  <script src="/static/app.js?v=10"></script>
+</body>
+</html>
