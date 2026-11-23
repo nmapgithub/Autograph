@@ -2,7 +2,7 @@
 
 Autograph writes a driver's signature as next-gen car telemetry. Pick a person, run their day or drive the car yourself, and every door, gear change, speed sample, window, mirror, wiper, and camera sighting lands in a time-series log. The same logs are scored the way a UEBA (user and entity behavior analytics) system would score them: how this person drives, and how far that day sits from a fixed safety line.
 
-It does not connect to a real car, and it does not send anything to a cluster until you export and load the files yourself.
+It does not connect to a real car. Logs stay on disk until you download them or push them to an OpenSearch cluster you name.
 
 ## What you get
 
@@ -119,14 +119,73 @@ A full day is large, often tens of megabytes, because every row carries the Tesl
 
 Copy `data/` if you want to keep drivers and logs across machines. Delete `data/` to start over. The next launch seeds the three drivers again.
 
-## Export
+## What each log contains
 
-On the Timeline tab, for the open run:
+Two kinds of documents are written. Both are one JSON object per line. `@timestamp` is the sample time with the driver's local offset. `entity` carries the VIN, driver id, and driver name. `simulator` is `autograph`. Days generated before the rename still say `relay`.
+
+### Telemetry
+
+`log_type` is `telemetry`. One row is one instant. Driving and the door sequence use the interval you pick. Parked and charging rows are coarser.
+
+| Field | What it holds |
+| --- | --- |
+| `phase` | `driving`, `maneuver`, `access`, `parked`, or `charging`. |
+| `trip_id`, `trip_name` | The trip this sample belongs to. Empty while the car is only parked. |
+| `interval_ms` | How far this row sits from the next one. |
+| `road` | Road class, posted limit in km/h, and weather. |
+| `reading` | The short view the Logs table uses: speed in km/h, gear, state of charge, open doors, window positions, wiper, lock, belt, latitude, longitude, and `seen`. |
+| `reading.seen` | One line from the cameras, such as `2 vehicles · curbs · driver`. Blank on days written before camera logging. |
+| `tesla` | Fleet-style names and units. `VehicleSpeed` is mph. `Gear` is a shift state. `DriverSeatBelt` is true when the belt is unbuckled. |
+| `vss` | The same instant as COVESA VSS. `Vehicle.Speed` is km/h. Tire pressure is kPa. `IsBelted` is true when the belt is fastened. Seat occupancy leaves are filled from the cabin camera. |
+| `perception` | Simulated vision. `stack` is `TeslaVision-occupancy`. |
+| `can` | ISO 11898 frames at 500 kbit/s. Each frame has an id, a name, and a hex payload. |
+
+A perception track has `id`, `class` (`vehicle`, `pedestrian`, `obstacle`, `speed_bump`), `camera`, `range_m`, `lateral_m`, `rel_speed_mps`, `confidence`, `in_path`, `parked`, and `moving`. At most eight tracks are kept, nearest first. Confidence falls with distance, rain, and night, and a track under 0.42 is dropped. `curbs` has `left_m`, `right_m`, and `confidence`. `parking_spaces` has `id`, `side`, `range_m`, `length_m`, `width_m`, `free`, and `confidence`. `cabin` says who is in the driver seat, the passenger seat, and both rear seats, plus whether the driver's hands are on the wheel. `counts` and `summary` repeat that picture in short form. CAN frame `0x3C2` (`SIM_vision`) is the count summary, not the full track list.
+
+The eight exterior cameras are FrontMain, FrontNarrow, FrontFisheye, LeftRepeater, RightRepeater, LeftPillar, RightPillar, and Rear, plus Cabin. On Street, Avenue, and Ring road the logged objects are the ones drawn on the Drive tab.
+
+### Events
+
+`log_type` is `event`. A row is written when something changes, not on every sample. `event` is the kind, `severity` is `info`, `watch`, or `alert`, `detail` is the change, and `context` repeats speed, gear, state of charge, and the posted limit.
+
+| Kind | When it is written |
+| --- | --- |
+| `session_start`, `session_end` | The generated day opens and closes. |
+| `trip_start`, `trip_end` | One drive inside that day. |
+| `phase` | The car moves between parked, access, maneuver, driving, and charging. |
+| `gear_shift` | Park, reverse, neutral, or drive. |
+| `door_open`, `door_close` | A cabin door. |
+| `door_open_while_moving` | A door opens above 5 km/h. Severity `alert`. |
+| `trunk_open`, `trunk_close`, `frunk_open`, `frunk_close` | The trunk or the frunk. |
+| `charge_port_open`, `charge_port_close` | The charge port. |
+| `lock`, `unlock` | The car locks or unlocks. |
+| `window` | A window command changes. |
+| `wiper`, `washer` | Wiper mode, or a wash. |
+| `mirror_fold`, `mirror_adjust` | Fold, or a pan and tilt nudge. |
+| `seatbelt` | The belt is fastened or released. Release is `watch`. |
+| `seatbelt_off_moving`, `seatbelt_on_moving` | The belt is off above 10 km/h, then fastened again. The off edge is `alert`. |
+| `autopilot` | Highway autosteer engages or drops. |
+| `turn_signal`, `high_beam` | Indicator or high beam. |
+| `drive_rail` | The high-voltage rail. |
+| `occupancy` | The cabin goes from empty to occupied, or back. |
+| `speeding_start`, `speeding_end` | Speed crosses 5 percent over a limit of at least 40 km/h. The start is `alert`. |
+| `hard_brake` | Longitudinal accel crosses below −3.5 m/s². `alert`. |
+| `hard_accel` | Longitudinal accel crosses above 2.8 m/s². `alert`. |
+| `charge_start`, `charge_state`, `charge_complete` | Home charging at 11 kW. |
+| `vision_detect` | A new pedestrian, vehicle, obstacle, or speed bump enters view. A pedestrian in the path inside 8 m is `alert`. |
+| `parking_space` | A free bay comes into range. |
+| `injected_speed_burst`, `injected_door` | Only when you inject a risky stretch. |
+
+A Drive-tab trip uses the same telemetry document. Its event file is the on-screen log, classified as `gear_shift`, `door`, `speed_breaker`, `hurdle`, `seatbelt`, `lock`, `window`, `mirror`, `path`, `takeover`, or `note`. Camera lines from that view are included.
+
+The `*.series.json` file is not a log for OpenSearch. It is the downsampled speed trace for the Timeline chart.
+
+## OpenSearch export
+
+Timeline downloads one run:
 
 - **Download telemetry JSONL** and **Download events JSONL** are the raw documents.
-- **OpenSearch bulk — telemetry** and **OpenSearch bulk — events** are newline-delimited bulk files. Each document is preceded by an action line for index `vehicle-telemetry` or `vehicle-events`.
-
-The same files are available directly:
+- **OpenSearch bulk — telemetry** and **OpenSearch bulk — events** put an action line in front of each document.
 
 ```text
 GET /api/runs/{id}/export?kind=telemetry&fmt=jsonl
@@ -135,17 +194,66 @@ GET /api/runs/{id}/export?kind=telemetry&fmt=bulk
 GET /api/runs/{id}/export?kind=events&fmt=bulk
 ```
 
-On the Logs tab, **Push to OpenSearch** asks for the protocol, host, port, username, password, and the two index names, then sends every run straight to that cluster. Telemetry defaults to `vehicle-telemetry` and events to `vehicle-events`. The password is used for that push and is not saved. For a local cluster with the demo certificate, turn on “Allow a self-signed certificate”.
+A bulk line pair looks like this:
 
-You can still load a downloaded bulk file yourself:
+```text
+{"index":{"_index":"vehicle-telemetry"}}
+{"@timestamp":"...","log_type":"telemetry", ...}
+```
+
+Logs has two controls for every run at once.
+
+**Export all logs for OpenSearch** downloads `autograph-opensearch.ndjson`. Telemetry documents are tagged for `vehicle-telemetry`. Events are tagged for `vehicle-events`. Oldest run first.
+
+```text
+GET /api/export/opensearch
+```
+
+**Push to OpenSearch** sends those same documents to a cluster you name. The form asks for protocol (`http` or `https`), host, port, username, password, telemetry index, and events index. Port 9200 and the two default index names are filled in. Leave the username blank if the cluster has no security plugin. **Allow a self-signed certificate** turns off TLS verification for a local demo certificate. The password is sent with that push and is not written to disk or to the repository.
+
+The push creates an index when it is missing, then posts `/_bulk` in batches of about 200 documents. The status line reports how many documents were stored and the first rejection, if any.
+
+You can still load a downloaded file yourself:
 
 ```bash
 curl -s -H "Content-Type: application/x-ndjson" -X POST \
   "https://YOUR_OPENSEARCH:9200/_bulk" \
-  --data-binary @telemetry.ndjson
+  --data-binary @autograph-opensearch.ndjson
 ```
 
 `@timestamp` is the field to use as the time axis.
+
+## How UEBA scores a day
+
+UEBA here means the driving signature of one person, scored two ways. The code is `app/ueba.py`. A generated day calls `analyze` with that driver's saved baseline. A Drive-tab trip is scored the same way, against an empty baseline, and it does not update the baseline.
+
+### Absolute score
+
+The absolute score uses fixed envelopes. A fleet of fast drivers does not move the line. Each factor is a weight times a scale from 0 to 1. The scale is 0 at the low end of the envelope and 1 at the high end. Points under 0.8 are dropped. The sum is capped at 100.
+
+| Factor | Weight | Envelope |
+| --- | --- | --- |
+| Speeding | 24 | Share of moving time above the limit, from 3 percent to 22 percent. Counted when the limit is at least 40 km/h and speed is more than 5 percent over it. |
+| Peak speed | 20 | 100 km/h to 140 km/h. |
+| Hard braking | 12 | 2 to 14 stops harder than 3.5 m/s², per 100 km. |
+| Hard launch | 10 | 1 to 14 pull-aways above 2.8 m/s², per 100 km. |
+| Belt off while moving | 16 | 3 to 70 seconds unbelted above 10 km/h. |
+| Door open while rolling | 18 | Flat, if a door, the trunk, or the frunk is open above 5 km/h. |
+| Left unlocked | 10 | 30 to 240 seconds parked, empty, and unlocked. |
+| Tire pressure | 4 | Flat, if any tire is under 2.6 bar. |
+| Night driving | 4 | Share of moving time after 21:00 or before 05:00, from 15 percent to 80 percent. |
+
+Under 25 is **low**. Under 55 is **watch**. The rest is **high**.
+
+Gear shifts, door cycles, windows, mirrors, and wipers do not add points. They are the habit lines on the card: distance, time, average and peak speed, shifts, reverse, doors, windows, mirrors, wiper minutes, autopilot share, state of charge, energy, and charge time. They affect the score only when they show up as a safety factor above, such as a door open while rolling.
+
+### Personal baseline
+
+The personal note compares this day with earlier days from the same driver. Each watched metric keeps a running mean and a sum of squares (Welford's method), stored in SQLite. With two or more earlier days, a metric is flagged when it sits at least 2.2 standard deviations away and the gap is at least half the metric's floor. With one earlier day, only the safety metrics are flagged, and only for a large jump. The first day for a driver only starts the baseline.
+
+Watched metrics: peak speed, average speed, time over the limit, hard brakes, hard launches, belt-off time, door-open-while-rolling time, time left unlocked, gear shifts, door cycles, window changes, distance, and wiper time.
+
+A generated day updates that baseline after it is scored. **Inject a risky stretch** is scored and then left out of the baseline, so one planted bad day does not become the driver's normal. A Drive-tab trip is scored for the run record and left out of the baseline too. The UEBA board shows the latest generated day for each driver, and uses a drive-tab trip only when that person has no generated day yet.
 
 ## HTTP API
 
@@ -174,6 +282,14 @@ There is no login. Anyone who can reach the port can run days, add drivers, and 
 ## Deploy
 
 This is a single process: FastAPI serves the page, the API, and the static files. There is no separate frontend build.
+
+**Docker Compose.** From the project directory:
+
+```bash
+docker compose up --build
+```
+
+Open http://127.0.0.1:8000. The container listens on every interface inside the image and publishes port 8000. Drivers, the SQLite file, and the JSONL logs are stored in `./data` on the host, so they survive a rebuild. Stop it with `docker compose down`. That leaves `./data` in place. There is no login, so do not publish port 8000 on the internet.
 
 **Your own machine.** Use the Run section. Bind to `127.0.0.1` so only you can open it.
 
@@ -227,9 +343,12 @@ app/simulator.py   A generated day and the telemetry document
 app/perception.py  Camera, curb, parking, and cabin tracks
 app/drivelog.py    Persistence for Drive-tab trips
 app/ueba.py        Absolute score and the personal baseline
+app/opensearch.py  Bulk download and the direct cluster push
 app/catalog.py     Signal names, CAN frames, parameter limits
 app/store.py       SQLite and the log directory
 static/            The lab page, styles, and the drive view
+Dockerfile         Image for the lab
+docker-compose.yml One-command deploy, with ./data persisted
 run.bat            Windows launcher
 requirements.txt   fastapi and uvicorn
 ```
